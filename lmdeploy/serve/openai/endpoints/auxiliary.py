@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from __future__ import annotations
 
+import base64
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
@@ -8,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from lmdeploy.serve.openai.errors import create_error_response
 from lmdeploy.serve.openai.protocol import (
     EmbeddingsRequest,
+    EmbeddingsResponse,
     EncodeRequest,
     EncodeResponse,
     PoolingRequest,
@@ -21,12 +23,75 @@ from lmdeploy.serve.utils.server_utils import validate_json_request
 
 def register(router: APIRouter, server_context) -> None:
 
-    @router.post('/v1/embeddings', tags=['unsupported'])
+    @router.post('/v1/embeddings')
     async def create_embeddings(request: EmbeddingsRequest,
                                 raw_request: Request = None):
-        """Creates embeddings for the text."""
-        return create_error_response(HTTPStatus.BAD_REQUEST,
-                                     'Unsupported by turbomind.')
+        """Creates embeddings for the text.
+
+        OpenAI-compatible embeddings API.
+        Refer to https://platform.openai.com/docs/api-reference/embeddings/create
+        """
+        if server_context.task != 'embed':
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                'Embedding endpoint requires --task embed.')
+
+        async_engine = server_context.async_engine
+        model_name = request.model or async_engine.model_name
+        request_input = request.input
+
+        # Normalize inputs to list[list[int]]
+        if isinstance(request_input, str):
+            input_ids = [async_engine.tokenizer.encode(request_input)]
+        elif isinstance(request_input, list):
+            if not request_input:
+                return create_error_response(HTTPStatus.BAD_REQUEST,
+                                             'Input list cannot be empty.')
+            if isinstance(request_input[0], str):  # list[str]
+                input_ids = [
+                    async_engine.tokenizer.encode(p) for p in request_input
+                ]
+            elif isinstance(request_input[0], int):  # list[int]
+                input_ids = [request_input]
+            elif isinstance(request_input[0], list):  # list[list[int]]
+                input_ids = request_input
+            else:
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    'Input list contains an invalid type.')
+        else:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'Invalid input type.')
+
+        # Get embeddings via hidden state extraction
+        batch_embeddings = await async_engine.async_get_embeddings(input_ids)
+
+        # Optional dimension truncation
+        dimensions = request.dimensions
+        if dimensions is not None:
+            batch_embeddings = [emb[:dimensions] for emb in batch_embeddings]
+
+        prompt_tokens = sum(len(ids) for ids in input_ids)
+        usage = UsageInfo(prompt_tokens=prompt_tokens,
+                          completion_tokens=0,
+                          total_tokens=prompt_tokens)
+
+        encode_base64 = request.encoding_format == 'base64'
+        data = []
+        for i, embedding in enumerate(batch_embeddings):
+            if encode_base64:
+                embedding = base64.b64encode(
+                    embedding.float().numpy().tobytes()).decode('utf-8')
+            else:
+                embedding = embedding.tolist()
+            data.append({
+                'object': 'embedding',
+                'index': i,
+                'embedding': embedding,
+            })
+
+        resp = EmbeddingsResponse(model=model_name, data=data, usage=usage)
+        return resp.model_dump()
 
     @router.post('/v1/encode', dependencies=[Depends(validate_json_request)])
     async def encode(request: EncodeRequest, raw_request: Request = None):

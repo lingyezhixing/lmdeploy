@@ -74,6 +74,7 @@ class ServerContext:
         self.api_server_url: str | None = None
         self.allow_terminate_by_client = False
         self.enable_abort_handling = False
+        self.task: str = 'llm'
         self.response_parser_cls: type[ResponseParser] | None = None
         self.default_gen_config: dict = {}
         # A successfully initialized context enables decision scoring; otherwise the endpoint returns 503.
@@ -302,7 +303,7 @@ def serve(model_path: str,
           speculative_config: SpeculativeConfig | None = None,
           allowed_media_domains: list[str] | None = None,
           generation_config: str = 'auto',
-          task: str | None = None,
+          task: Literal['llm', 'embed', 'intern-decision'] | None = 'llm',
           decision_temperature: float | None = None,
           monitoring_port: int | None = None,
           **kwargs):
@@ -360,8 +361,9 @@ def serve(model_path: str,
         allow_terminate_by_client (bool): Allow request from client to terminate server.
         allowed_media_domains (list[str] | None): Optional exact hostname
             allowlist for HTTP(S) media URLs.
-        task (str | None): Set to ``'intern-decision'`` to enable decision scoring
-            on the PyTorch backend.
+        task (str | None): Serving task. One of ``'llm'`` (chat/completions),
+            ``'embed'`` (/v1/embeddings, TurboMind only) or ``'intern-decision'``
+            to enable decision scoring on the PyTorch backend.
         decision_temperature (float | None): Explicit decision calibration,
             overriding checkpoint metadata and known model-path temperatures.
             Must be finite and positive. Unknown models without calibration fail startup.
@@ -378,8 +380,9 @@ def serve(model_path: str,
     if isinstance(api_keys, str):
         api_keys = [api_keys]
 
-    if task not in (None, 'intern-decision'):
-        raise ValueError(f'Unknown task: {task!r}. Use task="intern-decision".')
+    if task not in (None, 'llm', 'embed', 'intern-decision'):
+        raise ValueError(
+            f'Unknown task: {task!r}. Use one of "llm", "embed" or "intern-decision".')
     if decision_temperature is not None:
         if task != 'intern-decision':
             raise ValueError('decision_temperature requires task="intern-decision".')
@@ -387,7 +390,7 @@ def serve(model_path: str,
         decision_temperature = resolve_temperature(model_path, temperature=decision_temperature)
     original_model_path = model_path
 
-    if task is not None:
+    if task == 'intern-decision':
         from lmdeploy.intern_decision_encoding import resolve_temperature
         from lmdeploy.serve.parsers.decision_parser import validate_decision_config
         if backend_config is None:
@@ -408,6 +411,7 @@ def serve(model_path: str,
     server_context = ServerContext()
     server_context.allow_terminate_by_client = allow_terminate_by_client
     server_context.enable_abort_handling = enable_abort_handling
+    server_context.task = task or 'llm'
     from lmdeploy.serve.parsers import validate_parser_names
     reasoning_parser, tool_call_parser = validate_parser_names(
         reasoning_parser, tool_call_parser)
@@ -427,6 +431,7 @@ def serve(model_path: str,
     handle_torchrun()
     _, pipeline_class = get_task(backend,
                                  model_path,
+                                 task=task or 'llm',
                                  trust_remote_code=trust_remote_code,
                                  backend_config=backend_config)
     if isinstance(backend_config, PytorchEngineConfig):
@@ -452,7 +457,7 @@ def serve(model_path: str,
         enable_request_trace=trace_enabled,
         **kwargs)
     set_parsers(server_context, reasoning_parser, tool_call_parser)
-    if task is not None:
+    if task == 'intern-decision':
         from lmdeploy.serve.parsers.decision_parser import create_decision_context
         try:
             server_context.decision_context = create_decision_context(

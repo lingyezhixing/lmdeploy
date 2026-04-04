@@ -482,7 +482,9 @@ class CompletionStreamResponse(BaseModel):
 class EmbeddingsRequest(BaseModel):
     """Embedding request."""
     model: str = None
-    input: str | list[str]
+    input: str | list[str] | list[int] | list[list[int]]
+    encoding_format: Literal['float', 'base64'] = 'float'
+    dimensions: int | None = None
     user: str | None = None
 
 
@@ -492,6 +494,8 @@ class EmbeddingsResponse(BaseModel):
     data: list[dict[str, Any]]
     model: str
     usage: UsageInfo
+    id: str = Field(default_factory=lambda: f'embd-{shortuuid.random()}')
+    created: int = Field(default_factory=lambda: int(time.time()))
 
 
 class PoolingRequest(BaseModel):
