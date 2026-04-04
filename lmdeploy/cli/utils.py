@@ -744,6 +744,17 @@ class ArgumentHelper:
         return spec_group
 
     @staticmethod
+    def task(parser):
+        """Add argument task to parser."""
+        return parser.add_argument('--task',
+                                   type=str,
+                                   default='llm',
+                                   choices=['llm', 'embed'],
+                                   help='Task type for the model. '
+                                   '"llm" for text generation, '
+                                   '"embed" for embedding extraction.')
+
+    @staticmethod
     def distributed_executor_backend(parser):
         """Distributed_executor_backend."""
         return parser.add_argument('--distributed-executor-backend',

@@ -675,3 +675,43 @@ class AsyncEngine:
             for session in sessions:
                 self.session_mgr.remove(session)
         return logits
+
+    async def async_get_embeddings(self, input_ids: list[list[int]]) -> list[list[float]]:
+        """Get embedding vectors with last-token pooling and L2 normalization.
+
+        Only supports turbomind backend. Use ``--task embed`` to enable.
+        """
+        assert input_ids and all(isinstance(_, list) for _ in input_ids)
+
+        hidden_states = [None] * len(input_ids)
+
+        async def _proc(session, i):
+            async with session.request_handle() as handle:
+                gen_config = GenerationConfig(max_new_tokens=1,
+                                              output_last_hidden_state='all',
+                                              top_k=1)
+                async with self.safe_run(handle,
+                                         session=session,
+                                         input_ids=input_ids[i],
+                                         gen_config=gen_config,
+                                         stream_output=False,
+                                         sequence_start=True,
+                                         sequence_end=True,
+                                         step=session.step) as gen:
+                    async for outputs in gen:
+                        pass
+                    hidden_states[i] = outputs.last_hidden_state
+
+        sessions = [self.session_mgr.get() for _ in range(len(input_ids))]
+        tasks = [_proc(session, i) for i, session in enumerate(sessions)]
+        await asyncio.gather(*tasks)
+        for session in sessions:
+            self.session_mgr.remove(session)
+
+        # Last token pooling + L2 normalization
+        embeddings = []
+        for hs in hidden_states:
+            last_hidden = hs[-1, :]
+            norm = torch.norm(last_hidden, p=2).clamp(min=1e-8)
+            embeddings.append((last_hidden / norm).cpu().tolist())
+        return embeddings

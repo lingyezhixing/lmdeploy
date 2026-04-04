@@ -172,6 +172,27 @@ class Qwen2MoeModel(LlamaModel):
 
 
 class Qwen3Reader(LlamaReader):
+    """Qwen3 model reader.
+
+    Auto-detects weight key prefix to handle both Qwen3-LLM
+    (``model.layers.X.*``) and Qwen3-Embedding (``layers.X.*``).
+    """
+
+    # Match all known prefix variants
+    attn_layer_patten = r'(?:model\.language_model\.|model\.)?layers\.([0-9]+)\.'
+
+    def __init__(self, new_params, unused_params, last_bin, model_cfg, policy,
+                 fp8_quant=False):
+        super().__init__(new_params, unused_params, last_bin, model_cfg, policy,
+                         fp8_quant)
+        # Qwen3-Embedding: weights have no 'model.' prefix
+        if not any(k.startswith('model.') for k in self.params):
+            self.tok_embeddings_key = 'embed_tokens.weight'
+            self.norm_weight_key = 'norm.weight'
+            if any(k.startswith('layers.') for k in self.params):
+                self.attn_layer_prefix = 'layers'
+            if self.model_cfg.get('tie_word_embeddings', False):
+                self.output_weight_key = self.tok_embeddings_key
 
     def qk_norm(self, i: int):
         result = []

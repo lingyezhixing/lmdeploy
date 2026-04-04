@@ -365,15 +365,19 @@ class CompletionStreamResponse(BaseModel):
 class EmbeddingsRequest(BaseModel):
     """Embedding request."""
     model: str = None
-    input: str | list[str]
+    input: str | list[str] | list[int] | list[list[int]]
+    encoding_format: Literal['float', 'base64'] = 'float'
+    dimensions: int | None = None
     user: str | None = None
 
 
 class EmbeddingsResponse(BaseModel):
     """Embedding response."""
+    id: str = Field(default_factory=lambda: f'embd-{shortuuid.random()}')
     object: str = 'list'
-    data: list[dict[str, Any]]
+    created: int = Field(default_factory=lambda: int(time.time()))
     model: str
+    data: list[dict[str, Any]]
     usage: UsageInfo
 
 

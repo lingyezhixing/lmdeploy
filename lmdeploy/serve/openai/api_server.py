@@ -58,6 +58,7 @@ from lmdeploy.serve.openai.protocol import (
     CompletionStreamResponse,
     DeltaMessage,
     EmbeddingsRequest,
+    EmbeddingsResponse,
     EncodeRequest,
     EncodeResponse,
     ErrorResponse,
@@ -98,6 +99,8 @@ class VariableInterface:
     tool_parser: ToolParser | None = None
     allow_terminate_by_client: bool = False
     enable_abort_handling: bool = False
+    # task type: 'llm' or 'embed'
+    task: str = 'llm'
 
     @staticmethod
     def get_session(session_id: int) -> int:
@@ -1075,10 +1078,69 @@ async def generate(request: GenerateReqInput, raw_request: Request = None):
     return response
 
 
-@router.post('/v1/embeddings', tags=['unsupported'])
+@router.post('/v1/embeddings')
 async def create_embeddings(request: EmbeddingsRequest, raw_request: Request = None):
-    """Creates embeddings for the text."""
-    return create_error_response(HTTPStatus.BAD_REQUEST, 'Unsupported by turbomind.')
+    """Creates embeddings for the text.
+
+    OpenAI-compatible embeddings API.
+    Refer to https://platform.openai.com/docs/api-reference/embeddings/create
+    """
+    if VariableInterface.task != 'embed':
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            'Embedding endpoint requires --task embed.')
+
+    if request.encoding_format != 'float':
+        return create_error_response(
+            HTTPStatus.BAD_REQUEST,
+            f'encoding_format={request.encoding_format} is not supported, '
+            'only "float" is supported.')
+
+    async_engine = VariableInterface.async_engine
+    model_name = request.model or async_engine.model_name
+    request_input = request.input
+
+    # Normalize inputs to list[list[int]]
+    if isinstance(request_input, str):
+        input_ids = [async_engine.tokenizer.encode(request_input)]
+    elif isinstance(request_input, list):
+        if not request_input:
+            return create_error_response(HTTPStatus.BAD_REQUEST, 'Input list cannot be empty.')
+        if isinstance(request_input[0], str):  # list[str]
+            input_ids = [async_engine.tokenizer.encode(p) for p in request_input]
+        elif isinstance(request_input[0], int):  # list[int]
+            input_ids = [request_input]
+        elif isinstance(request_input[0], list):  # list[list[int]]
+            input_ids = request_input
+        else:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'Input list contains an invalid type.')
+    else:
+        return create_error_response(HTTPStatus.BAD_REQUEST, 'Invalid input type.')
+
+    # Get embeddings via hidden state extraction
+    batch_embeddings = await async_engine.async_get_embeddings(input_ids)
+
+    # Optional dimension truncation
+    dimensions = request.dimensions
+    if dimensions is not None:
+        batch_embeddings = [emb[:dimensions] for emb in batch_embeddings]
+
+    prompt_tokens = sum(len(ids) for ids in input_ids)
+    usage = UsageInfo(prompt_tokens=prompt_tokens,
+                      completion_tokens=0,
+                      total_tokens=prompt_tokens)
+
+    data = []
+    for i, embedding in enumerate(batch_embeddings):
+        data.append({
+            'object': 'embedding',
+            'index': i,
+            'embedding': embedding,
+        })
+
+    resp = EmbeddingsResponse(model=model_name, data=data, usage=usage)
+    return resp.model_dump()
 
 
 @router.post('/v1/encode', dependencies=[Depends(validate_json_request)])
@@ -1420,6 +1482,7 @@ def serve(model_path: str,
           allow_terminate_by_client: bool = False,
           enable_abort_handling: bool = False,
           speculative_config: SpeculativeConfig | None = None,
+          task: Literal['llm', 'embed'] = 'llm',
           **kwargs):
     """An example to perform model inference through the command line
     interface.
@@ -1487,7 +1550,8 @@ def serve(model_path: str,
         http_or_https = 'https'
 
     handle_torchrun()
-    _, pipeline_class = get_task(backend, model_path)
+    _, pipeline_class = get_task(backend, model_path, task=task)
+    VariableInterface.task = task
     if isinstance(backend_config, PytorchEngineConfig):
         backend_config.enable_mp_engine = True
         # router replay

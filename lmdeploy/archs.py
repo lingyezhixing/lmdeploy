@@ -128,9 +128,12 @@ def check_vl_llm(backend: str, config: dict) -> bool:
     return False
 
 
-def get_task(backend: str, model_path: str):
+def get_task(backend: str, model_path: str, task: str = 'llm'):
     """Get pipeline type and pipeline class from model config."""
     from lmdeploy.serve.core import AsyncEngine
+
+    if task == 'embed':
+        return 'embed', AsyncEngine
 
     if os.path.exists(os.path.join(model_path, 'triton_models', 'weights')):
         # workspace model
