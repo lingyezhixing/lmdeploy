@@ -73,6 +73,7 @@ class SubCliServe:
                             'concurrently during that time. Default to None.')
         # common args
         ArgumentHelper.backend(parser)
+        ArgumentHelper.task(parser)
         ArgumentHelper.log_level(parser)
         ArgumentHelper.api_keys(parser)
         ArgumentHelper.ssl(parser)
@@ -318,6 +319,7 @@ class SubCliServe:
                 reasoning_parser=args.reasoning_parser,
                 tool_call_parser=args.tool_call_parser,
                 speculative_config=speculative_config,
+                task=args.task,
             )
         else:
             from lmdeploy.serve.openai.launch_server import launch_server
@@ -350,6 +352,7 @@ class SubCliServe:
                 reasoning_parser=args.reasoning_parser,
                 tool_call_parser=args.tool_call_parser,
                 speculative_config=speculative_config,
+                task=args.task,
             )
 
     @staticmethod

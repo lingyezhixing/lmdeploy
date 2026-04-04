@@ -132,10 +132,14 @@ def check_vl_llm(backend: str, config: dict) -> bool:
 
 def get_task(backend: str,
              model_path: str,
+             task: str = 'llm',
              trust_remote_code: bool = False,
              backend_config: PytorchEngineConfig | TurbomindEngineConfig | None = None):
     """Get pipeline type and pipeline class from model config."""
     from lmdeploy.serve.core import AsyncEngine
+
+    if task == 'embed':
+        return 'embed', AsyncEngine
 
     if backend_config and backend_config.disable_vision_encoder:
         return 'llm', AsyncEngine
