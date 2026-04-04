@@ -713,5 +713,5 @@ class AsyncEngine:
         for hs in hidden_states:
             last_hidden = hs[-1, :]
             norm = torch.norm(last_hidden, p=2).clamp(min=1e-8)
-            embeddings.append((last_hidden / norm).cpu().tolist())
+            embeddings.append((last_hidden / norm).cpu())
         return embeddings
