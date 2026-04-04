@@ -82,6 +82,7 @@ class SubCliServe:
                             help='Exact hostnames allowed for HTTP(S) media URLs.')
         # common args
         ArgumentHelper.backend(parser)
+        ArgumentHelper.task(parser)
         ArgumentHelper.log_level(parser)
         ArgumentHelper.api_keys(parser)
         ArgumentHelper.ssl(parser)
@@ -347,6 +348,7 @@ class SubCliServe:
                 speculative_config=speculative_config,
                 allowed_media_domains=args.allowed_media_domains,
                 generation_config=args.generation_config,
+                task=args.task,
             )
         else:
             from lmdeploy.serve.openai.launch_server import launch_server
@@ -381,6 +383,7 @@ class SubCliServe:
                 speculative_config=speculative_config,
                 allowed_media_domains=args.allowed_media_domains,
                 generation_config=args.generation_config,
+                task=args.task,
             )
 
     @staticmethod

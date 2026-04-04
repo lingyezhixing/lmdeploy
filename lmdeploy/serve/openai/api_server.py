@@ -61,6 +61,7 @@ class ServerContext:
         self.api_server_url: str | None = None
         self.allow_terminate_by_client = False
         self.enable_abort_handling = False
+        self.task: str = 'llm'
         self.response_parser_cls: type[ResponseParser] | None = None
         self.default_gen_config: dict = {}
 
@@ -281,6 +282,7 @@ def serve(model_path: str,
           speculative_config: SpeculativeConfig | None = None,
           allowed_media_domains: list[str] | None = None,
           generation_config: str = 'auto',
+          task: Literal['llm', 'embed'] = 'llm',
           **kwargs):
     """An example to perform model inference through the command line
     interface.
@@ -342,6 +344,7 @@ def serve(model_path: str,
     server_context = ServerContext()
     server_context.allow_terminate_by_client = allow_terminate_by_client
     server_context.enable_abort_handling = enable_abort_handling
+    server_context.task = task
     from lmdeploy.serve.parsers import validate_parser_names
     reasoning_parser, tool_call_parser = validate_parser_names(
         reasoning_parser, tool_call_parser)
@@ -361,6 +364,7 @@ def serve(model_path: str,
     handle_torchrun()
     _, pipeline_class = get_task(backend,
                                  model_path,
+                                 task=task,
                                  trust_remote_code=trust_remote_code,
                                  backend_config=backend_config)
     if isinstance(backend_config, PytorchEngineConfig):

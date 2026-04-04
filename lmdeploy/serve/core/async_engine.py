@@ -967,3 +967,61 @@ class AsyncEngine:
             raise ValueError('async_get_ppl failed to compute ce_loss.')
         # normalize the summed NLL by the number of scored tokens
         return ce_loss / num_scored
+
+    async def async_get_embeddings(self, input_ids: list[list[int]]) -> list[list[float]]:
+        """Get embedding vectors with last-token pooling and L2 normalization.
+
+        Only supports turbomind backend. Use ``--task embed`` to enable.
+        """
+        assert input_ids and all(isinstance(_, list) for _ in input_ids)
+
+        # Reserve one token for the max_new_tokens=1 generation step: an input
+        # exactly at session_len would have max_new_tokens truncated to 0 and
+        # the generation-position hidden state would never be produced. Passing
+        # max_new_tokens=0 directly is not an option either: the engine still
+        # samples one token and leaves the engine state inconsistent for later
+        # requests.
+        max_input_len = max(1, self.session_len - 1)
+        truncated = 0
+        _input_ids = []
+        for ids in input_ids:
+            if len(ids) > max_input_len:
+                truncated += 1
+                ids = ids[:max_input_len]
+            _input_ids.append(ids)
+        if truncated:
+            logger.warning(f'[async_get_embeddings] truncated {truncated} input(s) '
+                           f'to {max_input_len} tokens (session_len={self.session_len})')
+        input_ids = _input_ids
+
+        hidden_states = [None] * len(input_ids)
+
+        async def _proc(session, i):
+            async with session.request_handle() as handle:
+                gen_config = GenerationConfig(max_new_tokens=1,
+                                              output_last_hidden_state='all',
+                                              top_k=1)
+                async with self.safe_run(handle,
+                                         session=session,
+                                         input_ids=input_ids[i],
+                                         gen_config=gen_config,
+                                         stream_output=False,
+                                         sequence_start=True,
+                                         sequence_end=True) as gen:
+                    async for outputs in gen:
+                        pass
+                    hidden_states[i] = outputs.last_hidden_state
+
+        sessions = [self.session_mgr.get() for _ in range(len(input_ids))]
+        tasks = [_proc(session, i) for i, session in enumerate(sessions)]
+        await asyncio.gather(*tasks)
+        for session in sessions:
+            self.session_mgr.remove(session)
+
+        # Last token pooling + L2 normalization
+        embeddings = []
+        for hs in hidden_states:
+            last_hidden = hs[-1, :]
+            norm = torch.norm(last_hidden, p=2).clamp(min=1e-8)
+            embeddings.append((last_hidden / norm).cpu())
+        return embeddings
