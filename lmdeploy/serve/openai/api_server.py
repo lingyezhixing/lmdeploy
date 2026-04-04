@@ -1090,12 +1090,6 @@ async def create_embeddings(request: EmbeddingsRequest, raw_request: Request = N
             HTTPStatus.BAD_REQUEST,
             'Embedding endpoint requires --task embed.')
 
-    if request.encoding_format != 'float':
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            f'encoding_format={request.encoding_format} is not supported, '
-            'only "float" is supported.')
-
     async_engine = VariableInterface.async_engine
     model_name = request.model or async_engine.model_name
     request_input = request.input
@@ -1131,8 +1125,14 @@ async def create_embeddings(request: EmbeddingsRequest, raw_request: Request = N
                       completion_tokens=0,
                       total_tokens=prompt_tokens)
 
+    encode_base64 = request.encoding_format == 'base64'
     data = []
     for i, embedding in enumerate(batch_embeddings):
+        if encode_base64:
+            import base64
+            import struct
+            emb_bytes = struct.pack(f'{len(embedding)}f', *embedding)
+            embedding = base64.b64encode(emb_bytes).decode('ascii')
         data.append({
             'object': 'embedding',
             'index': i,
