@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
+import struct
 import time
 from collections.abc import AsyncGenerator
 from contextlib import aclosing, asynccontextmanager
@@ -1165,10 +1167,7 @@ async def create_embeddings(request: EmbeddingsRequest, raw_request: Request = N
     data = []
     for i, embedding in enumerate(batch_embeddings):
         if encode_base64:
-            import base64
-            import struct
-            emb_bytes = struct.pack(f'{len(embedding)}f', *embedding)
-            embedding = base64.b64encode(emb_bytes).decode('ascii')
+            embedding = base64.b64encode(struct.pack(f'{len(embedding)}f', *embedding)).decode('ascii')
         data.append({
             'object': 'embedding',
             'index': i,
