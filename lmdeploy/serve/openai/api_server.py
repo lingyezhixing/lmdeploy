@@ -282,7 +282,7 @@ def serve(model_path: str,
           speculative_config: SpeculativeConfig | None = None,
           allowed_media_domains: list[str] | None = None,
           generation_config: str = 'auto',
-          task: Literal['llm', 'embed'] = 'llm',
+          task: Literal['llm', 'embed', 'rerank'] = 'llm',
           **kwargs):
     """An example to perform model inference through the command line
     interface.

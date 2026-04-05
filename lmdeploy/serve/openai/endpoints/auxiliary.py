@@ -16,6 +16,10 @@ from lmdeploy.serve.openai.protocol import (
     PoolingResponse,
     PPLRequest,
     PPLResponse,
+    RerankDocument,
+    RerankRequest,
+    RerankResponse,
+    RerankResult,
     UsageInfo,
 )
 from lmdeploy.serve.utils.server_utils import validate_json_request
@@ -23,7 +27,7 @@ from lmdeploy.serve.utils.server_utils import validate_json_request
 
 def register(router: APIRouter, server_context) -> None:
 
-    @router.post('/v1/embeddings')
+    @router.post('/v1/embeddings', dependencies=[Depends(validate_json_request)])
     async def create_embeddings(request: EmbeddingsRequest,
                                 raw_request: Request = None):
         """Creates embeddings for the text.
@@ -92,6 +96,51 @@ def register(router: APIRouter, server_context) -> None:
 
         resp = EmbeddingsResponse(model=model_name, data=data, usage=usage)
         return resp.model_dump()
+
+    @router.post('/v1/rerank', dependencies=[Depends(validate_json_request)])
+    async def create_rerank(request: RerankRequest,
+                            raw_request: Request = None):
+        """Rerank documents by relevance to a query.
+
+        Compatible with Jina/Cohere rerank API format.
+        """
+        if server_context.task != 'rerank':
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'Rerank endpoint requires --task rerank.')
+
+        async_engine = server_context.async_engine
+        model_name = request.model or async_engine.model_name
+
+        if not request.documents:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'Documents list cannot be empty.')
+
+        # Compute rerank scores
+        scored_results, prompt_tokens = \
+            await async_engine.async_get_rerank_scores(
+                query=request.query, documents=request.documents)
+
+        # Apply top_n filtering
+        if request.top_n is not None and request.top_n > 0:
+            scored_results = scored_results[:request.top_n]
+
+        # Build response
+        results = []
+        for score, original_index in scored_results:
+            doc = RerankDocument(
+                text=request.documents[original_index]
+            ) if request.return_documents else None
+            results.append(RerankResult(index=original_index,
+                                        relevance_score=score,
+                                        document=doc))
+
+        usage = UsageInfo(prompt_tokens=prompt_tokens,
+                          completion_tokens=0,
+                          total_tokens=prompt_tokens)
+
+        return RerankResponse(model=model_name,
+                              results=results,
+                              usage=usage).model_dump()
 
     @router.post('/v1/encode', dependencies=[Depends(validate_json_request)])
     async def encode(request: EncodeRequest, raw_request: Request = None):

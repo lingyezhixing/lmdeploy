@@ -130,8 +130,12 @@ def get_task(backend: str,
     """Get pipeline type and pipeline class from model config."""
     from lmdeploy.serve.core import AsyncEngine
 
-    if task == 'embed':
-        return 'embed', AsyncEngine
+    if task in ('embed', 'rerank'):
+        if backend != 'turbomind':
+            raise ValueError(f'--task {task} requires the turbomind backend, got {backend!r}. '
+                             'The pytorch backend cannot output last hidden states or '
+                             'generation logits.')
+        return task, AsyncEngine
 
     if backend_config and backend_config.language_model_only:
         return 'llm', AsyncEngine
