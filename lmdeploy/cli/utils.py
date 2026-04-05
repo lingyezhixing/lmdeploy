@@ -935,10 +935,11 @@ class ArgumentHelper:
         return parser.add_argument('--task',
                                    type=str,
                                    default='llm',
-                                   choices=['llm', 'embed', 'intern-decision'],
+                                   choices=['llm', 'embed', 'rerank', 'intern-decision'],
                                    help='Task type for the model. '
                                    '"llm" for text generation, '
                                    '"embed" for embedding extraction, '
+                                   '"rerank" for reranking, '
                                    '"intern-decision" for decision scoring on the PyTorch backend.')
 
     @staticmethod

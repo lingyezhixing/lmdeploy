@@ -303,7 +303,7 @@ def serve(model_path: str,
           speculative_config: SpeculativeConfig | None = None,
           allowed_media_domains: list[str] | None = None,
           generation_config: str = 'auto',
-          task: Literal['llm', 'embed', 'intern-decision'] | None = 'llm',
+          task: Literal['llm', 'embed', 'rerank', 'intern-decision'] | None = 'llm',
           decision_temperature: float | None = None,
           monitoring_port: int | None = None,
           **kwargs):
@@ -362,8 +362,9 @@ def serve(model_path: str,
         allowed_media_domains (list[str] | None): Optional exact hostname
             allowlist for HTTP(S) media URLs.
         task (str | None): Serving task. One of ``'llm'`` (chat/completions),
-            ``'embed'`` (/v1/embeddings, TurboMind only) or ``'intern-decision'``
-            to enable decision scoring on the PyTorch backend.
+            ``'embed'`` (/v1/embeddings, TurboMind only), ``'rerank'``
+            (/v1/rerank, TurboMind only) or ``'intern-decision'`` to enable
+            decision scoring on the PyTorch backend.
         decision_temperature (float | None): Explicit decision calibration,
             overriding checkpoint metadata and known model-path temperatures.
             Must be finite and positive. Unknown models without calibration fail startup.
@@ -380,9 +381,9 @@ def serve(model_path: str,
     if isinstance(api_keys, str):
         api_keys = [api_keys]
 
-    if task not in (None, 'llm', 'embed', 'intern-decision'):
+    if task not in (None, 'llm', 'embed', 'rerank', 'intern-decision'):
         raise ValueError(
-            f'Unknown task: {task!r}. Use one of "llm", "embed" or "intern-decision".')
+            f'Unknown task: {task!r}. Use one of "llm", "embed", "rerank" or "intern-decision".')
     if decision_temperature is not None:
         if task != 'intern-decision':
             raise ValueError('decision_temperature requires task="intern-decision".')
