@@ -749,10 +749,11 @@ class ArgumentHelper:
         return parser.add_argument('--task',
                                    type=str,
                                    default='llm',
-                                   choices=['llm', 'embed'],
+                                   choices=['llm', 'embed', 'rerank'],
                                    help='Task type for the model. '
                                    '"llm" for text generation, '
-                                   '"embed" for embedding extraction.')
+                                   '"embed" for embedding extraction, '
+                                   '"rerank" for reranking.')
 
     @staticmethod
     def distributed_executor_backend(parser):

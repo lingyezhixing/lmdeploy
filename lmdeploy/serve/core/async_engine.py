@@ -38,6 +38,13 @@ from .exceptions import SafeRunException
 
 logger = get_logger('lmdeploy')
 
+# Qwen3-Reranker prompt template (from official HuggingFace README)
+QWEN3_RERANK_PREFIX = ('<|im_start|>system\n'
+                        'Judge whether the Document meets the requirements based on the Query '
+                        'and the Instruct provided. Note that the answer can only be "yes" or '
+                        '"no".<|im_end|>\n<|im_start|>user\n')
+QWEN3_RERANK_SUFFIX = '<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n'
+
 
 @dataclasses.dataclass
 class GenOut:
@@ -676,19 +683,19 @@ class AsyncEngine:
                 self.session_mgr.remove(session)
         return logits
 
-    async def async_get_embeddings(self, input_ids: list[list[int]]) -> list[list[float]]:
+    async def async_get_embeddings(self, input_ids: list[list[int]]) -> list[torch.Tensor]:
         """Get embedding vectors with last-token pooling and L2 normalization.
 
         Only supports turbomind backend. Use ``--task embed`` to enable.
         """
         assert input_ids and all(isinstance(_, list) for _ in input_ids)
 
-        hidden_states = [None] * len(input_ids)
+        embeddings = [None] * len(input_ids)
 
         async def _proc(session, i):
             async with session.request_handle() as handle:
                 gen_config = GenerationConfig(max_new_tokens=1,
-                                              output_last_hidden_state='all',
+                                              output_last_hidden_state='generation',
                                               top_k=1)
                 async with self.safe_run(handle,
                                          session=session,
@@ -700,7 +707,9 @@ class AsyncEngine:
                                          step=session.step) as gen:
                     async for outputs in gen:
                         pass
-                    hidden_states[i] = outputs.last_hidden_state
+                    last_hidden = outputs.last_hidden_state[0]
+                    norm = torch.norm(last_hidden, p=2).clamp(min=1e-8)
+                    embeddings[i] = (last_hidden / norm).cpu()
 
         sessions = [self.session_mgr.get() for _ in range(len(input_ids))]
         tasks = [_proc(session, i) for i, session in enumerate(sessions)]
@@ -708,10 +717,99 @@ class AsyncEngine:
         for session in sessions:
             self.session_mgr.remove(session)
 
-        # Last token pooling + L2 normalization
-        embeddings = []
-        for hs in hidden_states:
-            last_hidden = hs[-1, :]
-            norm = torch.norm(last_hidden, p=2).clamp(min=1e-8)
-            embeddings.append((last_hidden / norm).cpu())
         return embeddings
+
+    @staticmethod
+    def format_rerank_input(query: str, document: str,
+                            instruction: str = 'Given a web search query, retrieve '
+                            'relevant passages that answer the query') -> str:
+        """Format a query-document pair using the Qwen3-Reranker template.
+
+        Args:
+            query: The search query.
+            document: The document text.
+            instruction: Optional task instruction.
+
+        Returns:
+            Formatted string ready for tokenization.
+        """
+        body = (f'<Instruct>: {instruction}\n'
+                f'<Query>: {query}\n'
+                f'<Document>: {document}')
+        return QWEN3_RERANK_PREFIX + body + QWEN3_RERANK_SUFFIX
+
+    async def async_get_rerank_scores(
+            self,
+            query: str,
+            documents: list[str],
+            instruction: str = 'Given a web search query, retrieve relevant '
+            'passages that answer the query') -> tuple[list[tuple[float, int]],
+                                                       int]:
+        """Get rerank relevance scores for query-document pairs.
+
+        Uses the Qwen3-Reranker approach: format each pair through the chat
+        template, run a forward pass, extract logits at the last token position
+        for the "yes" and "no" tokens, then compute:
+            score = softmax([logit_no, logit_yes])[1]
+
+        Args:
+            query: The search query string.
+            documents: List of document strings to score.
+            instruction: Optional task instruction.
+
+        Returns:
+            Tuple of (results, prompt_tokens) where results is a list of
+            (score, original_index) tuples sorted by score descending.
+        """
+        import torch.nn.functional as F
+
+        token_true_id = self.tokenizer.encode('yes', add_bos=False,
+                                               add_special_tokens=False)[0]
+        token_false_id = self.tokenizer.encode('no', add_bos=False,
+                                                add_special_tokens=False)[0]
+
+        # Format and tokenize each query-document pair
+        all_input_ids = []
+        prompt_tokens = 0
+        for doc in documents:
+            formatted = self.format_rerank_input(query, doc, instruction)
+            ids = self.tokenizer.encode(formatted, add_bos=False,
+                                        add_special_tokens=False)
+            prompt_tokens += len(ids)
+            all_input_ids.append(ids)
+
+        scores: list[float | None] = [None] * len(documents)
+
+        async def _proc(session, i):
+            async with session.request_handle() as handle:
+                max_new_tokens = 1 if self.backend == 'turbomind' else 0
+                gen_config = GenerationConfig(max_new_tokens=max_new_tokens,
+                                              output_logits='generation',
+                                              top_k=1)
+                async with self.safe_run(handle,
+                                         session=session,
+                                         input_ids=all_input_ids[i],
+                                         gen_config=gen_config,
+                                         stream_output=False,
+                                         sequence_start=True,
+                                         sequence_end=True,
+                                         step=session.step) as gen:
+                    async for outputs in gen:
+                        pass
+                    last_logits = outputs.logits[0]
+                    scores[i] = F.softmax(
+                        torch.stack([last_logits[token_false_id],
+                                     last_logits[token_true_id]]),
+                        dim=0)[1].item()
+
+        sessions = [self.session_mgr.get() for _ in range(len(all_input_ids))]
+        await asyncio.gather(*[_proc(s, i) for i, s in enumerate(sessions)])
+        if self.backend == 'pytorch':
+            for s in sessions:
+                await s.async_close()
+        for s in sessions:
+            self.session_mgr.remove(s)
+
+        results = sorted(((s, i) for i, s in enumerate(scores)),
+                         key=lambda x: x[0], reverse=True)
+        return results, prompt_tokens

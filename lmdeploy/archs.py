@@ -135,6 +135,9 @@ def get_task(backend: str, model_path: str, task: str = 'llm'):
     if task == 'embed':
         return 'embed', AsyncEngine
 
+    if task == 'rerank':
+        return 'rerank', AsyncEngine
+
     if os.path.exists(os.path.join(model_path, 'triton_models', 'weights')):
         # workspace model
         return 'llm', AsyncEngine

@@ -500,3 +500,32 @@ class AbortRequest(BaseModel):
     abort_message: str | None = None
     # The session ID to abort. If `abort_all` is True, this field is ignored.
     session_id: int | None = -1
+
+
+class RerankDocument(BaseModel):
+    """A document for reranking."""
+    text: str
+
+
+class RerankResult(BaseModel):
+    """A single rerank result."""
+    index: int
+    relevance_score: float
+    document: RerankDocument | None = None
+
+
+class RerankRequest(BaseModel):
+    """Rerank request compatible with Jina/Cohere API format."""
+    model: str | None = None
+    query: str
+    documents: list[str]
+    top_n: int | None = None
+    return_documents: bool = False
+
+
+class RerankResponse(BaseModel):
+    """Rerank response."""
+    id: str = Field(default_factory=lambda: f'rerank-{shortuuid.random()}')
+    model: str
+    results: list[RerankResult]
+    usage: UsageInfo
