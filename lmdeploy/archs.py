@@ -141,6 +141,9 @@ def get_task(backend: str,
     if task == 'embed':
         return 'embed', AsyncEngine
 
+    if task == 'rerank':
+        return 'rerank', AsyncEngine
+
     if backend_config and backend_config.disable_vision_encoder:
         return 'llm', AsyncEngine
     _, config = get_model_arch(model_path, trust_remote_code=trust_remote_code)
