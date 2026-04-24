@@ -136,7 +136,59 @@ EVAL_CONFIGS = {
             'top_k': 50,
             'min_p': 0.0,
         }
-    }
+    },
+    'qwen3.5': {
+        'query_per_second': 4,
+        'max_out_len': 128000,
+        'max_seq_len': 128000,
+        'batch_size': 32,
+        'temperature': 1.0,
+        'extra_body': {
+            'top_k': 20,
+            'repetition_penalty': 1.0,
+            'top_p': 0.95,
+            'chat_template_kwargs': {'enable_thinking': True},
+        },
+    },
+    'longtext-256k': {
+        'query_per_second': 4,
+        'max_out_len': 280000,
+        'max_seq_len': 400000,
+        'batch_size': 32,
+        'temperature': 1.0,
+        'extra_body': {
+            'top_k': 20,
+            'repetition_penalty': 1.0,
+            'top_p': 0.95,
+            'chat_template_kwargs': {'enable_thinking': True},
+        },
+    },
+    'longtext-512k': {
+        'query_per_second': 4,
+        'max_out_len': 700000,
+        'max_seq_len': 700000,
+        'batch_size': 32,
+        'temperature': 1.0,
+        'extra_body': {
+            'top_k': 20,
+            'repetition_penalty': 1.0,
+            'top_p': 0.95,
+            'chat_template_kwargs': {'enable_thinking': True},
+        },
+    },
+    'qwen3.5-2batch': {
+        'query_per_second': 4,
+        'max_out_len': 128000,
+        'max_seq_len': 128000,
+        'batch_size': 2,
+        'temperature': 1.0,
+        'extra_body': {
+            'top_k': 20,
+            'repetition_penalty': 1.0,
+            'top_p': 0.95,
+            'chat_template_kwargs': {'enable_thinking': True},
+        },
+    },
 }
 
 MLLM_EVAL_CONFIGS = {
@@ -152,9 +204,11 @@ MLLM_EVAL_CONFIGS = {
 BACKEND_LIST = ['turbomind', 'pytorch']
 
 RESTFUL_MODEL_LIST_LATEST = [
-    'Qwen/Qwen3-32B', 'Qwen/Qwen3-30B-A3B', 'OpenGVLab/InternVL3_5-30B-A3B', 'OpenGVLab/InternVL3-38B',
-    'Qwen/Qwen3-VL-8B-Instruct', 'internlm/internlm3-8b-instruct', 'meta-llama/Llama-3.2-3B-Instruct',
-    'Qwen/Qwen3-VL-30B-A3B-Instruct'
+    'Qwen/Qwen3.5-27B', 'Qwen/Qwen3.5-35B-A3B', 'Qwen/Qwen3.5-35B-A3B-FP8', 'Qwen/Qwen3.5-122B-A10B',
+    'Qwen/Qwen3-32B', 'Qwen/Qwen3-30B-A3B', 'Qwen/Qwen3-0.6B', 'OpenGVLab/InternVL3_5-30B-A3B',
+    'OpenGVLab/InternVL3-38B', 'Qwen/Qwen3-VL-8B-Instruct', 'internlm/Intern-S1',
+    'internlm/internlm3-8b-instruct', 'meta-llama/Llama-3.2-3B-Instruct',
+    'Qwen/Qwen3-VL-30B-A3B-Instruct',
 ]
 
 RESTFUL_MODEL_LIST_LEGACY = ['internlm/internlm2_5-20b']
@@ -184,7 +238,8 @@ TOOL_REASONING_MODEL_LIST_LEGACY = [
 TOOL_REASONING_MODEL_LIST = TOOL_REASONING_MODEL_LIST_LEGACY if _IS_LEGACY else TOOL_REASONING_MODEL_LIST_LATEST
 
 RESTFUL_BASE_MODEL_LIST = [
-    'Qwen/Qwen3-8B-Base', 'internlm/internlm2_5-20b', 'Qwen/Qwen3-4B', 'internlm/internlm3-8b-instruct'
+    'Qwen/Qwen3.5-2B-Base', 'Qwen/Qwen3.5-35B-A3B-Base','Qwen/Qwen3-8B-Base',
+    'internlm/internlm2_5-20b', 'Qwen/Qwen3-4B', 'internlm/internlm3-8b-instruct'
 ]
 
 SUFFIX_INNER_AWQ = '-inner-4bits'
