@@ -75,6 +75,7 @@ class ServerContext:
         self.allow_terminate_by_client = False
         self.enable_abort_handling = False
         self.task: str = 'llm'
+        self.enable_thinking: bool | None = None
         self.response_parser_cls: type[ResponseParser] | None = None
         self.default_gen_config: dict = {}
         # A successfully initialized context enables decision scoring; otherwise the endpoint returns 503.
@@ -304,6 +305,7 @@ def serve(model_path: str,
           allowed_media_domains: list[str] | None = None,
           generation_config: str = 'auto',
           task: Literal['llm', 'embed', 'rerank', 'intern-decision'] | None = 'llm',
+          enable_thinking: bool | None = None,
           decision_temperature: float | None = None,
           monitoring_port: int | None = None,
           **kwargs):
@@ -368,6 +370,8 @@ def serve(model_path: str,
         decision_temperature (float | None): Explicit decision calibration,
             overriding checkpoint metadata and known model-path temperatures.
             Must be finite and positive. Unknown models without calibration fail startup.
+        enable_thinking (bool | None): Server-level default for
+            ``enable_thinking``. Request-level settings always override it.
     """
     if os.getenv('TM_LOG_LEVEL') is None:
         os.environ['TM_LOG_LEVEL'] = log_level
@@ -413,6 +417,7 @@ def serve(model_path: str,
     server_context.allow_terminate_by_client = allow_terminate_by_client
     server_context.enable_abort_handling = enable_abort_handling
     server_context.task = task or 'llm'
+    server_context.enable_thinking = enable_thinking
     from lmdeploy.serve.parsers import validate_parser_names
     reasoning_parser, tool_call_parser = validate_parser_names(
         reasoning_parser, tool_call_parser)
