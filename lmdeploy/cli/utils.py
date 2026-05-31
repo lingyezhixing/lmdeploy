@@ -488,6 +488,35 @@ class ArgumentHelper:
             'Default to None.')
 
     @staticmethod
+    def enable_thinking(parser):
+        """Add argument enable_thinking to parser."""
+
+        def _str_to_bool_or_none(val):
+            if val is None or val == '':
+                return None
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                low = val.lower()
+                if low in ('true', '1'):
+                    return True
+                if low in ('false', '0'):
+                    return False
+                if low in ('none', 'null'):
+                    return None
+            raise ValueError(f'Invalid value for --enable-thinking: {val!r}. '
+                             'Expected True/False/1/0 or omit for no default.')
+
+        return parser.add_argument(
+            '--enable-thinking',
+            type=_str_to_bool_or_none,
+            default=None,
+            help='Server-level default for enable_thinking. '
+            'Accepts True/False/1/0. If unset, each request uses its own '
+            'enable_thinking or the model default. '
+            'Request-level settings always override this default.')
+
+    @staticmethod
     def tool_call_parser(parser):
         """Add tool call parser to parser."""
         from lmdeploy.serve.parsers.tool_parser import ToolParserManager
