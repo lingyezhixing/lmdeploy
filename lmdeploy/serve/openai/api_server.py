@@ -115,6 +115,7 @@ class VariableInterface:
     enable_abort_handling: bool = False
     # task type: 'llm' or 'embed'
     task: str = 'llm'
+    enable_thinking: bool | None = None
     response_parser_cls: type[ResponseParser] | None = None
 
     @classmethod
@@ -482,6 +483,19 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
                 'Please launch the api_server with --tool-call-parser if you want to use tool.')
 
     random_seed = request.seed if request.seed is not None else None
+
+    # Inject server-level enable_thinking default if the request doesn't
+    # specify it explicitly (neither via the deprecated top-level field nor
+    # via chat_template_kwargs). Request-level setting always takes precedence.
+    server_enable_thinking = VariableInterface.enable_thinking
+    if server_enable_thinking is not None:
+        request_et = request.enable_thinking
+        request_ctk_et = (request.chat_template_kwargs or {}).get('enable_thinking')
+        if request_et is None and request_ctk_et is None:
+            request.chat_template_kwargs = {
+                **(request.chat_template_kwargs or {}),
+                'enable_thinking': server_enable_thinking,
+            }
 
     parser_cls = VariableInterface.response_parser_cls
     try:
@@ -1625,6 +1639,7 @@ def serve(model_path: str,
           enable_abort_handling: bool = False,
           speculative_config: SpeculativeConfig | None = None,
           task: Literal['llm', 'embed', 'rerank'] = 'llm',
+          enable_thinking: bool | None = None,
           **kwargs):
     """An example to perform model inference through the command line
     interface.
@@ -1677,6 +1692,9 @@ def serve(model_path: str,
         reasoning_parser (str): The reasoning parser name.
         tool_call_parser (str): The tool call parser name.
         allow_terminate_by_client (bool): Allow request from client to terminate server.
+        enable_thinking (bool | None): Server-level default for enable_thinking.
+            Accepts True/False. If unset, each request uses its own value or
+            the model default. Request-level settings always override this.
     """
     if os.getenv('TM_LOG_LEVEL') is None:
         os.environ['TM_LOG_LEVEL'] = log_level
@@ -1684,6 +1702,7 @@ def serve(model_path: str,
 
     VariableInterface.allow_terminate_by_client = allow_terminate_by_client
     VariableInterface.enable_abort_handling = enable_abort_handling
+    VariableInterface.enable_thinking = enable_thinking
 
     ssl_keyfile, ssl_certfile, http_or_https = None, None, 'http'
     if ssl:
