@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import random
+import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Any, Literal
@@ -53,7 +54,7 @@ class GenOut:
     history_token_len: int
     input_token_len: int
     generate_token_len: int
-    finish_reason: Literal['stop', 'length', 'error'] | None = None
+    finish_reason: Literal['stop', 'length', 'error', 'abort'] | None = None
     token_ids: list[int] | None = None
     logprobs: list[dict[int, float]] | None = None
     logits: Any = None
@@ -117,6 +118,7 @@ class AsyncEngine:
                  backend_config: TurbomindEngineConfig | PytorchEngineConfig | None = None,
                  chat_template_config: ChatTemplateConfig | None = None,
                  max_log_len: int | None = None,
+                 trust_remote_code: bool = False,
                  speculative_config: SpeculativeConfig | None = None,
                  **kwargs) -> None:
         logger.info(f'input backend={backend}, backend_config={backend_config}')
@@ -124,11 +126,11 @@ class AsyncEngine:
         backend_config = backend_config or (TurbomindEngineConfig()
                                             if backend == 'turbomind' else PytorchEngineConfig())
         self.model_name = model_name if model_name else model_path
-        self.chat_template = get_chat_template(model_path, chat_template_config)
-        self.tokenizer = Tokenizer(model_path)
+        self.chat_template = get_chat_template(model_path, chat_template_config, trust_remote_code=trust_remote_code)
+        self.tokenizer = Tokenizer(model_path, trust_remote_code=trust_remote_code)
         self.prompt_processor = MultimodalProcessor(self.tokenizer, self.chat_template)
-        self.hf_gen_cfg = get_hf_gen_cfg(model_path)
-        self.arch, self.hf_cfg = get_model_arch(model_path)
+        self.hf_gen_cfg = get_hf_gen_cfg(model_path, trust_remote_code=trust_remote_code)
+        self.arch, self.hf_cfg = get_model_arch(model_path, trust_remote_code=trust_remote_code)
         self.session_len = (_get_and_verify_max_len(self.hf_cfg, None)
                             if backend_config.session_len is None else backend_config.session_len)
         backend_config.session_len = self.session_len
@@ -136,10 +138,14 @@ class AsyncEngine:
             logger.warning('speculative decoding is not supported by turbomind ')
         # build backend engine
         if backend == 'turbomind':
-            self.engine = self._build_turbomind(model_path=model_path, backend_config=backend_config, **kwargs)
+            self.engine = self._build_turbomind(model_path=model_path,
+                                                backend_config=backend_config,
+                                                trust_remote_code=trust_remote_code,
+                                                **kwargs)
         elif backend == 'pytorch':
             self.engine = self._build_pytorch(model_path=model_path,
                                               backend_config=backend_config,
+                                              trust_remote_code=trust_remote_code,
                                               speculative_config=speculative_config,
                                               **kwargs)
         else:
@@ -165,6 +171,11 @@ class AsyncEngine:
         # build stat loggers
         self._build_stat_loggers()
         self.epoch = 0
+        self._health_probe_task: asyncio.Task | None = None
+        self._last_scheduler_tick: int | None = None
+        self._last_scheduler_tick_time: float = time.monotonic()
+        self._dispatched_start_time: float | None = None
+        self._idle_schedule_start_time: float | None = None
 
     def close(self):
         self.session_mgr.clear()
@@ -176,19 +187,31 @@ class AsyncEngine:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def _build_turbomind(self, model_path: str, backend_config: TurbomindEngineConfig | None = None, **kwargs):
+    def _build_turbomind(self,
+                         model_path: str,
+                         backend_config: TurbomindEngineConfig | None = None,
+                         trust_remote_code: bool = False,
+                         **kwargs):
         """Inner build method for turbomind backend."""
         from lmdeploy import turbomind as tm
-        return tm.TurboMind.from_pretrained(model_path, engine_config=backend_config, **kwargs)
+        return tm.TurboMind.from_pretrained(model_path,
+                                            engine_config=backend_config,
+                                            trust_remote_code=trust_remote_code,
+                                            **kwargs)
 
     def _build_pytorch(self,
                        model_path: str,
                        backend_config: PytorchEngineConfig | None = None,
                        speculative_config: SpeculativeConfig | None = None,
+                       trust_remote_code: bool = False,
                        **kwargs):
         """Inner build method for pytorch backend."""
         from lmdeploy.pytorch.engine import Engine
-        return Engine.from_pretrained(model_path, engine_config=backend_config, speculative_config=speculative_config)
+        return Engine.from_pretrained(model_path,
+                                      engine_config=backend_config,
+                                      speculative_config=speculative_config,
+                                      trust_remote_code=trust_remote_code,
+                                      **kwargs)
 
     def _build_stat_loggers(self):
         self.stat_loggers = []
@@ -208,8 +231,134 @@ class AsyncEngine:
             # set stats loggers of metrics processor
             metrics_processor.stat_loggers = self.stat_loggers
 
-    def get_schedule_metrics(self):
-        return self.engine.get_schedule_metrics()
+    def _if_session_stale(self, session: Session,
+                                   input_token_len: int) -> GenOut | None:
+        """If ``session.epoch`` was stamped by api_server and
+        ``stop_all_session`` ran since then (the engine epoch changed), drop
+        the session."""
+        epoch = session.epoch
+        if epoch is None or epoch == self.epoch:
+            return None
+        logger.info(f'[generate] drop stale session {session.session_id} '
+                    f'(session.epoch={epoch}, async_engine.epoch={self.epoch})')
+        return GenOut(response='',
+                      history_token_len=session.step,
+                      input_token_len=input_token_len,
+                      generate_token_len=0,
+                      finish_reason='abort',
+                      token_ids=[])
+
+    async def get_schedule_metrics(self):
+        result = self.engine.get_schedule_metrics()
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
+    def _validate_scheduler_progress(self, metrics, scheduler_stall_timeout: float) -> tuple[bool, str]:
+        now = time.monotonic()
+        if self._last_scheduler_tick is None or metrics.scheduler_tick != self._last_scheduler_tick:
+            self._last_scheduler_tick = metrics.scheduler_tick
+            self._last_scheduler_tick_time = now
+            self._idle_schedule_start_time = None
+
+        if self.session_mgr.request_handle_pool.num_dispatched == 0:
+            self._dispatched_start_time = None
+            self._idle_schedule_start_time = None
+            return True, ''
+
+        if self._dispatched_start_time is None:
+            self._dispatched_start_time = now
+
+        if metrics.active_seqs + metrics.waiting_seqs == 0:
+            if self._idle_schedule_start_time is None:
+                self._idle_schedule_start_time = now
+            if now - self._idle_schedule_start_time > scheduler_stall_timeout:
+                return False, ('Backend has dispatched request handle(s), but schedule metrics report no active or '
+                               'waiting sequences.')
+        else:
+            self._idle_schedule_start_time = None
+
+        last_progress_time = max(self._last_scheduler_tick_time, self._dispatched_start_time)
+        if now - last_progress_time > scheduler_stall_timeout:
+            return False, f'Backend scheduler_tick has not advanced for {now - last_progress_time:.1f}s.'
+        return True, ''
+
+    @staticmethod
+    def _make_health_result(status: str, message: str) -> dict:
+        return dict(status=status, message=message)
+
+    async def health_probe(self, timeout: float = 2.0, scheduler_stall_timeout: float = 15.0) -> dict:
+        """Probe backend health with a bounded, non-overlapping call."""
+        if self.is_sleeping:
+            return self._make_health_result(
+                status='sleeping',
+                message='Engine is sleeping.',
+            )
+
+        if self._health_probe_task is not None:
+            if not self._health_probe_task.done():
+                return self._make_health_result(
+                    status='unhealthy',
+                    message='Previous backend health probe is still pending.',
+                )
+            try:
+                self._health_probe_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._health_probe_task = None
+
+        self._health_probe_task = asyncio.create_task(self.engine.get_health_status(), name='EngineHealthProbe')
+        try:
+            backend_status = await asyncio.wait_for(asyncio.shield(self._health_probe_task), timeout=timeout)
+        except asyncio.TimeoutError:
+            return self._make_health_result(
+                status='unhealthy',
+                message=f'Backend health probe timed out after {timeout:.1f}s.',
+            )
+        except Exception as e:
+            self._health_probe_task = None
+            return self._make_health_result(
+                status='unhealthy',
+                message=f'Backend health probe failed: {e}',
+            )
+
+        self._health_probe_task = None
+        if not backend_status['alive']:
+            return self._make_health_result(
+                status='unhealthy',
+                message=backend_status['message'] or 'Backend reported unhealthy.',
+            )
+
+        schedule_metrics = backend_status['schedule_metrics']
+        if schedule_metrics is None:
+            if self.session_mgr.request_handle_pool.num_dispatched == 0:
+                self._dispatched_start_time = None
+                self._idle_schedule_start_time = None
+                return self._make_health_result(
+                    status='healthy',
+                    message=backend_status['message'] or 'Engine is healthy.',
+                )
+            return self._make_health_result(
+                status='unhealthy',
+                message='Backend did not return schedule metrics for dispatched request handle(s).',
+            )
+
+        valid_progress, invalid_message = self._validate_scheduler_progress(
+            schedule_metrics,
+            scheduler_stall_timeout=scheduler_stall_timeout,
+        )
+        if not valid_progress:
+            return self._make_health_result(
+                status='unhealthy',
+                message=invalid_message,
+            )
+
+        return self._make_health_result(
+            status='healthy',
+            message=backend_status['message'] or 'Engine is healthy.',
+        )
 
     async def do_log_stats(self):
         """Loop through CLI logger and Prometheus logger and output the
@@ -219,11 +368,12 @@ class AsyncEngine:
 
     async def stop_all_session(self):
         """Stop all running sessions."""
-        logger.info('stop all sessions')
+        logger.info(f'stop all sessions, epoch {self.epoch} -> {self.epoch + 1}')
         self.epoch += 1
         await self.session_mgr.async_abort_all()
+        logger.info('stopped all sessions')
 
-    def sleep(self, level: int = 1):
+    async def sleep(self, level: int = 1):
         """Sleep the model.
 
         Args:
@@ -231,9 +381,10 @@ class AsyncEngine:
                 weights and discard the kv cache. Level 2 sleep will
                 discard both the model weights and the kv cache.
         """
-        self.engine.sleep(level)
-        self.sleeping_tags = {'weights', 'kv_cache'}
         self.is_sleeping = True
+        self.sleeping_tags = {'weights', 'kv_cache'}
+        await self.stop_all_session()
+        await self.engine.sleep(level)
 
     def wakeup(self, tags: list[str] | None = None):
         """Wake up the model.
@@ -346,7 +497,8 @@ class AsyncEngine:
             do_preprocess (bool): whether pre-process the messages. Default to
                 True, which means chat_template will be applied.
         """
-        epoch = self.epoch
+        metrics_processor.increase_total_requests()
+
         if (messages is not None) ^ (input_ids is None):
             raise ValueError('You must specify exactly one of messages or input_ids')
         if isinstance(session_id, Session):
@@ -365,25 +517,36 @@ class AsyncEngine:
                 logger.warning('chat_template_kwargs["enable_thinking"] is already set, '
                                'the value will not be overwritten by enable_thinking')
         if messages:
-            prompt = messages
-            self.request_logger.log_prompt(session, prompt=prompt)
-            prompt_input = await self.prompt_processor.get_prompt_input(prompt=prompt,
-                                                                        do_preprocess=do_preprocess,
-                                                                        sequence_start=sequence_start,
-                                                                        adapter_name=adapter_name,
-                                                                        tools=tools,
-                                                                        reasoning_effort=reasoning_effort,
-                                                                        chat_template_kwargs=chat_template_kwargs,
-                                                                        media_io_kwargs=media_io_kwargs,
-                                                                        mm_processor_kwargs=mm_processor_kwargs,
-                                                                        **kwargs)
-            prompt = prompt_input['prompt']
-            input_ids = prompt_input['input_ids']
-            self.request_logger.log_inputs(session,
-                                           prompt=prompt,
-                                           prompt_token_ids=input_ids,
-                                           gen_config=gen_config,
-                                           adapter_name=adapter_name)
+            try:
+                prompt = messages
+                self.request_logger.log_prompt(session, prompt=prompt)
+                prompt_input = await self.prompt_processor.get_prompt_input(prompt=prompt,
+                                                                            do_preprocess=do_preprocess,
+                                                                            sequence_start=sequence_start,
+                                                                            adapter_name=adapter_name,
+                                                                            tools=tools,
+                                                                            reasoning_effort=reasoning_effort,
+                                                                            chat_template_kwargs=chat_template_kwargs,
+                                                                            media_io_kwargs=media_io_kwargs,
+                                                                            mm_processor_kwargs=mm_processor_kwargs,
+                                                                            **kwargs)
+                prompt = prompt_input.get('prompt')
+                input_ids = prompt_input.get('input_ids')
+                self.request_logger.log_inputs(session,
+                                            prompt=prompt,
+                                            prompt_token_ids=input_ids,
+                                            gen_config=gen_config,
+                                            adapter_name=adapter_name)
+            except Exception:
+                logger.exception('[generate] error in prompt processing')
+                metrics_processor.increase_failed_requests('error')
+                yield GenOut(response='in prompt processing error',
+                             history_token_len=session.step,
+                             input_token_len=len(input_ids) if input_ids is not None else 0,
+                             generate_token_len=0,
+                             finish_reason='error',
+                             token_ids=[])
+                return
         else:
             # TODO(lvhan) VLM doesn't support input_ids as an argument.
             # Figure out a graceful way to handle the invalid input
@@ -393,6 +556,7 @@ class AsyncEngine:
 
         if gen_config.max_new_tokens == 0:
             logger.info(f'run out of tokens. session={session_id}.')
+            metrics_processor.increase_failed_requests('error')
             yield GenOut(response='',
                          history_token_len=session.step,
                          input_token_len=len(input_ids),
@@ -407,6 +571,7 @@ class AsyncEngine:
                                                           or gen_config.output_logits == 'all'):
             errmsg = ('lmdeploy does not support outputting all token\'s logits or last_hidden_state '
                       'when prefix caching is ON')
+            metrics_processor.increase_failed_requests('error')
             yield GenOut(response=errmsg,
                          history_token_len=session.step,
                          input_token_len=len(input_ids),
@@ -428,10 +593,18 @@ class AsyncEngine:
         if not gen_config.ignore_eos:
             stop_ids = gen_config.stop_token_ids or []
 
-        metrics_processor.increase_total_requests()
+
+        stale = self._if_session_stale(session, len(prompt_input['input_ids']))
+        if stale is not None:
+            metrics_processor.increase_failed_requests('abort')
+            yield stale
+            if sequence_end:
+                self.session_mgr.remove(session)
+            return
         async with session.request_handle() as handle:
-            if epoch != self.epoch:
-                logger.info(f'[generate] session {session_id} got aborted before starting inference')
+            if session.epoch is not None and session.epoch != self.epoch:
+                logger.info(f'[generate] session {session_id} got aborted before starting inference, '
+                               f'session.epoch={session.epoch}, async_engine.epoch={self.epoch}')
                 metrics_processor.increase_failed_requests('abort')
                 yield GenOut(response='',
                              history_token_len=0,
@@ -439,6 +612,8 @@ class AsyncEngine:
                              generate_token_len=0,
                              finish_reason='abort',
                              token_ids=[])
+                if sequence_end:
+                    self.session_mgr.remove(session)
                 return
             token_ids = input_ids.copy()
             history_len = session.step
@@ -446,6 +621,7 @@ class AsyncEngine:
             output_len, gen_len = 0, 0
             state = DetokenizeState(input_len)
             response = ''
+            response_chunks = []
             finish_reason = None
             async with self.safe_run(handle,
                                      session=session,
@@ -489,6 +665,7 @@ class AsyncEngine:
                         state,
                         skip_special_tokens=gen_config.skip_special_tokens,
                         spaces_between_special_tokens=gen_config.spaces_between_special_tokens)
+                    response_chunks.append(response)
                     res = token_ids[ids_offset:]
 
                     out = GenOut(response,
@@ -508,6 +685,7 @@ class AsyncEngine:
                         out.logits = (outputs.logits[:-hit_stop_token] if hit_stop_token else outputs.logits)
                     yield out
                 # end of generator loop
+                self.request_logger.log_response(session_id, response_chunks)
 
                 if not is_error(outputs.status):
                     if outputs.status == ResponseType.CANCEL:
@@ -668,6 +846,8 @@ class AsyncEngine:
                     async for outputs in gen:
                         pass
                     logits[i] = outputs.logits[:input_len, :]
+                if sequence_end and self.backend == 'pytorch':
+                    await handle.async_end(session.session_id)
 
         create_sessions = False
         if sessions is None:
@@ -675,9 +855,6 @@ class AsyncEngine:
             sessions = [self.session_mgr.get() for _ in range(len(input_ids))]
         tasks = [_proc(session, i) for i, session in enumerate(sessions)]
         await asyncio.gather(*tasks)
-        if sequence_end and self.backend == 'pytorch':
-            for session in sessions:
-                await session.async_close()
         if sequence_end and create_sessions:
             for session in sessions:
                 self.session_mgr.remove(session)

@@ -13,7 +13,6 @@ add_library(Llama STATIC
         BlockTrie.cc
         SequenceManager.cc
         LlamaWeight.cc
-        LlamaDenseWeight.cc
         LlamaDecoderLayerWeight.cc
         LlamaFfnLayer.cc
         moe_ffn_layer.cc
@@ -45,5 +44,4 @@ target_link_libraries(Llama PUBLIC CUDA::cudart
         gpt_kernels
         memory_utils
         cuda_utils
-        logger
         anomaly_handler)

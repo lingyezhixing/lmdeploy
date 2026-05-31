@@ -26,10 +26,11 @@
 #include "3rdparty/cub/cub.cuh"
 #endif
 
+#include "src/turbomind/core/logger.h"
 #include "src/turbomind/kernels/logprob_kernels.h"
 #include "src/turbomind/kernels/reduce_kernel_utils.cuh"
 #include "src/turbomind/macro.h"
-#include "src/turbomind/utils/logger.h"
+#include "src/turbomind/utils/cuda_utils.h"
 
 namespace turbomind {
 
@@ -159,7 +160,7 @@ void invokeLogProbFromLogits(float*       cum_log_probs,
     // input_lengths: [batch_size]
     // workspace: workspace buffer of size at least sizeof(float) * max_input_length * batch_size.
 
-    TM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TM_LOG_DEBUG("{}", __PRETTY_FUNCTION__);
     // block_size should be multiple of 32 to use warpReduceMax.
     const int block_size = vocab_size < 1024 ? (vocab_size + 31) / 32 * 32 : 1024;
     assert(block_size % 32 == 0);
@@ -181,6 +182,7 @@ void invokeLogProbFromLogits(float*       cum_log_probs,
                                                          batch_first);
     accumulate_log_probs<<<batch_size, block_size, 0, stream>>>(
         cum_log_probs, log_probs, input_lengths, max_input_length, batch_size, batch_first);
+    TM_CUDA_CHECK(cudaGetLastError());
 }
 
 template void invokeLogProbFromLogits(float*       cum_log_probs,

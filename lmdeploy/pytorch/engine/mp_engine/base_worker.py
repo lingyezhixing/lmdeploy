@@ -84,6 +84,10 @@ class EngineWorkerBase:
         """Get schedule metrics."""
         return self.engine.get_schedule_metrics()
 
+    async def get_health_status(self):
+        """Get engine health status."""
+        return await self.engine.get_health_status()
+
     def p2p_initialize(self, conn_request: DistServeInitRequest):
         """Init rdma link."""
         return self.engine.p2p_initialize(conn_request)
@@ -100,9 +104,9 @@ class EngineWorkerBase:
         """
         return self.engine.p2p_drop_connect(drop_conn_request)
 
-    def sleep(self, level: int = 1):
+    async def sleep(self, level: int = 1):
         """sleep."""
-        return self.engine.sleep(level)
+        return await self.engine.sleep(level)
 
     def wakeup(self, tags: list[str] | None = None):
         """Wakeup."""
@@ -151,7 +155,9 @@ class EngineOutputGather:
     def pop(self, stream_id, result):
         if not isinstance(result, EngineOutput):
             return result
-        output = self._output.pop(stream_id)
+        output = self._output.pop(stream_id, None)
+        if output is None:
+            return result
         result.token_ids = output.token_ids or []
         result.logprobs = output.logprobs or None
         return result

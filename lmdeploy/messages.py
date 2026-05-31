@@ -16,6 +16,16 @@ from .utils import get_logger
 
 logger = get_logger('lmdeploy')
 
+
+class QuantPolicy(enum.IntEnum):
+    """Quantization policy constants for KV cache."""
+    NONE = 0
+    INT4 = 4  # 4-bit KV cache
+    INT8 = 8  # 8-bit KV cache
+    FP8 = 16  # FP8 KV cache (float8_e4m3fn, per-tensor scale)
+    FP8_E5M2 = 17  # FP8 KV cache (float8_e5m2, per-tensor scale)
+    TURBO_QUANT = 42  # TurboQuant: K=4bit QJL4 + V=2bit MSE
+
 LogitsProcessor = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 """LogitsProcessor is a function that takes a tensor of input_ids, the logits
 tensor for the next token, and returns a modified tensor of logits to sample
@@ -97,7 +107,9 @@ class GenerationConfig:
 
         logits_processors: Custom logit processors.
         repetition_ngram_size: The size of n-grams to consider for repetition early stop.
+            Must be non-negative; values below 0 are treated as 0.
         repetition_ngram_threshold: The number of times an n-gram must be repeated to trigger early stop.
+            Must be non-negative; values below 0 are treated as 0.
     """
 
     n: int = 1
@@ -185,6 +197,9 @@ class GenerationConfig:
         assert self.temperature >= 0 and self.temperature <= 2  # [0,2]
         assert 0 <= self.min_p <= 1, \
             f'min_p should be in range [0, 1], but found {self.min_p}'
+        if self.repetition_ngram_size <= 0 or self.repetition_ngram_threshold <= 0:
+            self.repetition_ngram_size = 0
+            self.repetition_ngram_threshold = 0
 
 
 @pydantic_dataclass
@@ -229,8 +244,8 @@ class TurbomindEngineConfig:
             a k/v block, default to 64
         enable_prefix_caching: enable cache prompts for block reuse,
             default to False
-        quant_policy: default to 0. When k/v is quantized into 4 or 8
-            bit, set it to 4 or 8, respectively
+        quant_policy: default to 0. For TurboMind, when k/v is quantized
+            into int4 or int8, set it to 4 or 8, respectively
         rope_scaling_factor: scaling factor used for dynamic ntk,
             default to 0. TurboMind follows the implementation of transformer
             LlamaAttention
@@ -298,7 +313,14 @@ class TurbomindEngineConfig:
         assert self.dtype in ['auto', 'float16', 'bfloat16']
         assert self.tp >= 1, 'tp must be a positive integer'
         assert self.cache_max_entry_count > 0, 'invalid cache_max_entry_count'
-        assert self.quant_policy in (0, 4, 8), 'invalid quant_policy'
+        try:
+            self.quant_policy = QuantPolicy(self.quant_policy)
+        except ValueError as e:
+            raise ValueError(f'invalid quant_policy: {self.quant_policy}') from e
+        assert self.quant_policy not in (
+            QuantPolicy.FP8,
+            QuantPolicy.FP8_E5M2,
+        ), 'invalid quant_policy for TurboMind, FP8 quantization is not supported'
         assert self.rope_scaling_factor >= 0, 'invalid rope_scaling_factor'
         assert self.max_prefill_token_num >= 0, \
             'invalid max_prefill_token_num'
@@ -350,8 +372,9 @@ class PytorchEngineConfig:
         revision: The specific model version to use.
             It can be a branch name, a tag name, or a commit id.
             If unspecified, will use the default version.
-        quant_policy: default to 0. When k/v is quantized into 4 or 8
-            bit, set it to 4 or 8, respectively
+        quant_policy: default to 0. When k/v is quantized into int4,
+            int8, fp8, or fp8_e5m2, set it to 4, 8, 16, or 17,
+            respectively
         distributed_executor_backend: backend of distributed backend,
             options: ['uni', 'mp', 'ray']
         empty_init: Whether to load the model weights, you should set
@@ -392,10 +415,11 @@ class PytorchEngineConfig:
     cache_max_entry_count: float = 0.8
     prefill_interval: int = 16
     block_size: int = 64
+    kernel_block_size: int = -1
     num_cpu_blocks: int = 0
     num_gpu_blocks: int = 0
     adapters: dict[str, str] = None
-    max_prefill_token_num: int = 4096
+    max_prefill_token_num: int = 8192
     thread_safe: bool = False
     enable_prefix_caching: bool = False
     device_type: str = 'cuda'
@@ -403,7 +427,7 @@ class PytorchEngineConfig:
     custom_module_map: dict[str, str] = None
     download_dir: str = None
     revision: str = None
-    quant_policy: Literal[0, 4, 8] = 0
+    quant_policy: QuantPolicy = QuantPolicy.NONE
     distributed_executor_backend: str = None
     empty_init: bool = False
     enable_microbatch: bool = False
@@ -430,6 +454,8 @@ class PytorchEngineConfig:
 
     def __post_init__(self):
         """Check input validation."""
+        if self.kernel_block_size == -1:
+            self.kernel_block_size = self.block_size
         assert self.dtype in ['auto', 'float16', 'bfloat16']
         assert self.tp >= 1, 'invalid tp'
         assert self.dp >= 1, 'invalid dp'
@@ -440,17 +466,27 @@ class PytorchEngineConfig:
         assert self.max_prefill_token_num >= 0, \
             'invalid max_prefill_token_num'
         assert self.num_gpu_blocks >= 0, 'invalid num_gpu_blocks'
-        assert self.quant_policy in (0, 4, 8), 'invalid quant_policy'
+        try:
+            self.quant_policy = QuantPolicy(self.quant_policy)
+        except ValueError as e:
+            raise ValueError(f'invalid quant_policy: {self.quant_policy}') from e
         assert self.device_type in ['cuda', 'ascend', 'maca', 'camb'], (f'invalid device_type: {self.device_type}')
-        assert self.block_size >= 16 and (self.block_size & (self.block_size - 1)) == 0, \
-            f'block_size must be >= 16 and a power of 2, but got {self.block_size}'
+        assert self.kernel_block_size >= 16 and \
+               (self.kernel_block_size & (self.kernel_block_size - 1)) == 0, \
+               f'kernel_block_size must be >= 16 and a power of 2, but got {self.kernel_block_size}'
+        assert self.block_size >= self.kernel_block_size and \
+               self.block_size % self.kernel_block_size == 0, \
+               (f'block_size must be >= kernel_block_size and an integer multiple '
+                f'of kernel_block_size, but got block_size {self.block_size} '
+                f'and kernel_block_size {self.kernel_block_size}')
         if self.quant_policy > 0 and self.device_type not in ['cuda', 'ascend']:
             assert False, \
                    'kv cache quantization only works for CUDA and ASCEND.'
         if self.device_type == 'camb' and self.block_size != 16:
             self.block_size = 16
-            logger.warning('Currently, camb device requires block size to be 16, \
-                    setting block size to 16')
+            self.kernel_block_size = 16
+            logger.warning('Currently, camb device requires block_size and kernel_block_size to be 16, '
+                           'setting both to 16.')
 
 
 class ResponseType(enum.Enum):
@@ -599,6 +635,7 @@ class ScheduleMetrics:
     cached_blocks: int = 0
     free_blocks: int = 0
     prefix_cache_hit_rate: float = 0
+    scheduler_tick: int = 0
 
 
 @dataclass

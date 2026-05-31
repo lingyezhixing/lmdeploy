@@ -4,13 +4,19 @@ add_library(models STATIC
         language_model.cc
         input_processor.cc
         output_processor.cc
+        linear_weight.cc
+        norm_weight.cc
+        attention_weight.cc
+        ffn_weight.cc
+        moe_weight.cc
+        delta_net_weight.cc
+        decoder_layer_weight.cc
+        model_weight.cc
+        model_root.cc
         llama/LlamaLinear.cu
         llama/BlockManager.cc
         llama/BlockTrie.cc
         llama/SequenceManager.cc
-        llama/LlamaWeight.cc
-        llama/LlamaDenseWeight.cc
-        llama/LlamaDecoderLayerWeight.cc
         llama/LlamaFfnLayer.cc
         llama/moe_ffn_layer.cc
         llama/unified_decoder.cc
@@ -18,7 +24,6 @@ add_library(models STATIC
         llama/llama_kernels.cu
         llama/llama_utils.cu
         llama/mla_utils.cu
-        llama/GatedDeltaNetWeight.cc
         llama/GatedDeltaNetLayer.cc
         llama/gated_delta_net_kernels.cu)
 set_property(TARGET models PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -40,7 +45,6 @@ target_link_libraries(models PUBLIC
         gpt_kernels
         memory_utils
         cuda_utils
-        logger
         anomaly_handler)
 target_compile_options(models PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v --generate-line-info --threads 8>)
 

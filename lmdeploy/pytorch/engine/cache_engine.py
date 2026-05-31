@@ -2,9 +2,7 @@
 # modify from: https://github.com/vllm-project/vllm
 import json
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 
@@ -20,6 +18,7 @@ from lmdeploy.pytorch.disagg.messages import (
 )
 from lmdeploy.utils import get_logger
 
+from ...messages import QuantPolicy
 from ..config import CacheConfig, ModelConfig
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
@@ -50,6 +49,38 @@ def _get_kv_cache_dtype(model_config: ModelConfig):
     if model_config.use_mla_fp8_cache:
         kv_cache_dtype = torch.float8_e4m3fn
     return kv_cache_dtype
+
+
+_FP8_CACHE_DTYPES = {
+    QuantPolicy.FP8: torch.float8_e4m3fn,
+    QuantPolicy.FP8_E5M2: torch.float8_e5m2,
+}
+
+_KV_CACHE_QUANT_POLICY_DESCS = {
+    QuantPolicy.FP8: 'fp8_e4m3 KV cache',
+    QuantPolicy.FP8_E5M2: 'fp8_e5m2 KV cache',
+    QuantPolicy.INT4: 'int4 KV cache',
+    QuantPolicy.INT8: 'int8 KV cache',
+    QuantPolicy.TURBO_QUANT: 'TurboQuant KV cache',
+}
+
+
+def _is_fp8_quant_policy(quant_policy: QuantPolicy):
+    """Return whether quant policy stores KV payload as torch FP8."""
+    return quant_policy in _FP8_CACHE_DTYPES
+
+
+def _get_fp8_cache_dtype(quant_policy: QuantPolicy):
+    """Get the cache tensor dtype for an FP8 KV-cache quant policy."""
+    try:
+        return _FP8_CACHE_DTYPES[quant_policy]
+    except KeyError as e:
+        raise ValueError(f'Not an FP8 quant policy: {quant_policy}') from e
+
+
+def _describe_kv_cache_quant_policy(quant_policy: QuantPolicy):
+    """Describe the active KV-cache quantization policy for logs."""
+    return _KV_CACHE_QUANT_POLICY_DESCS.get(quant_policy)
 
 
 # 512*1 + 4*4 + 64*2 = 656
@@ -84,20 +115,28 @@ class CacheEngine:
         self.cache_config = cache_config
         self.model_config = model_config
 
-        self.block_size = cache_config.block_size
+        self.block_size = cache_config.kernel_block_size
         self.num_layers = model_config.num_layers
         self.kv_cache_dtype = _get_kv_cache_dtype(self.model_config)
 
         if self.model_config.use_mla_fp8_cache:
             cache_config.quant_policy = 0
 
-        if cache_config.quant_policy > 0:
+        if _is_fp8_quant_policy(cache_config.quant_policy):
+            self.kv_cache_dtype = _get_fp8_cache_dtype(cache_config.quant_policy)
+            assert self.cache_config.device_type in ['cuda'], \
+                f'FP8 quantization is only supported on CUDA device, but got {self.cache_config.device_type}.'
+        elif cache_config.quant_policy > 0:
             if self.cache_config.device_type in ['cuda']:
                 self.kv_cache_dtype = torch.uint8
             elif self.cache_config.device_type in ['ascend', 'npu']:
                 self.kv_cache_dtype = torch.int8
             else:
                 raise ValueError(f'unsupported device_type {self.cache_config.device_type}')
+
+        quant_desc = _describe_kv_cache_quant_policy(cache_config.quant_policy)
+        if quant_desc is not None:
+            logger.info('Using %s.', quant_desc)
 
         # Initialize the cache.
         self.local_gpu_cache = self.allocate_gpu_cache()
@@ -106,6 +145,8 @@ class CacheEngine:
         self.migration_backend_impl: MigrationBackendImpl | None = None
 
         # Initialize the stream for caching operations.
+        # Non-CUDA device integrations currently provide CUDA-compatible torch
+        # APIs in their backend layer, so the cache engine keeps this path.
         self.cache_stream = cache_stream or torch.cuda.Stream()
         assert self.cache_stream != torch.cuda.current_stream()
         # Initialize the events for stream synchronization.
@@ -140,7 +181,7 @@ class CacheEngine:
                                   block_size: int,
                                   head_size: int,
                                   world_size: int = 1,
-                                  quant_policy: Literal[0, 4, 8] = 0):
+                                  quant_policy: QuantPolicy = QuantPolicy.NONE):
         """Get single block shape."""
         attn_backend = get_backend()
         dtype = model_config.dtype
@@ -155,7 +196,8 @@ class CacheEngine:
         if model_config.use_mla_fp8_cache:
             return (block_size, num_heads, MLA_FP8_HEAD_DIM)
 
-        if quant_policy == 4:  # pack head_dim to uint8
+        # pack head_dim to uint8 (4-bit)
+        if quant_policy == QuantPolicy.INT4 or quant_policy == QuantPolicy.TURBO_QUANT:
             assert head_size % 2 == 0, \
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
             head_size = head_size // 2
@@ -167,7 +209,7 @@ class CacheEngine:
                                     block_size: int,
                                     head_size: int,
                                     world_size: int = 1,
-                                    quant_policy: Literal[0, 4, 8] = 0):
+                                    quant_policy: QuantPolicy = QuantPolicy.NONE):
         """Get single block shape."""
         attn_backend = get_backend()
         dtype = model_config.dtype
@@ -183,7 +225,11 @@ class CacheEngine:
             # flash mla shared key and value
             return (block_size, num_heads, 0)
 
-        if quant_policy == 4:  # pack head_dim to uint8
+        if quant_policy == QuantPolicy.TURBO_QUANT:  # pack head_dim to uint8 (2-bit for V cache)
+            assert head_size % 4 == 0, \
+                f'head_size: {head_size}, quant_policy: {quant_policy}'
+            head_size = head_size // 4
+        elif quant_policy == QuantPolicy.INT4:  # pack head_dim to uint8 (4-bit)
             assert head_size % 2 == 0, \
                 f'head_size: {head_size}, quant_policy: {quant_policy}'
             head_size = head_size // 2
@@ -198,14 +244,16 @@ class CacheEngine:
             head_size = model_config.head_dim
         shape = cls._get_key_block_shape_impl(
             model_config,
-            block_size=cache_config.block_size,
+            block_size=cache_config.kernel_block_size,
             head_size=head_size,
             world_size=world_size,
             quant_policy=cache_config.quant_policy,
         )
         shape = list(shape)
         dtype = _get_kv_cache_dtype(model_config)
-        if cache_config.quant_policy in (4, 8):
+        if _is_fp8_quant_policy(cache_config.quant_policy):
+            dtype = _get_fp8_cache_dtype(cache_config.quant_policy)
+        elif cache_config.quant_policy in (QuantPolicy.INT4, QuantPolicy.INT8, QuantPolicy.TURBO_QUANT):
             dtype = torch.uint8
         return CacheDesc(shape=shape, dtype=dtype)
 
@@ -217,14 +265,16 @@ class CacheEngine:
             head_size = model_config.head_dim
         shape = cls._get_value_block_shape_impl(
             model_config,
-            block_size=cache_config.block_size,
+            block_size=cache_config.kernel_block_size,
             head_size=head_size,
             world_size=world_size,
             quant_policy=cache_config.quant_policy,
         )
         shape = list(shape)
         dtype = _get_kv_cache_dtype(model_config)
-        if cache_config.quant_policy in (4, 8):
+        if _is_fp8_quant_policy(cache_config.quant_policy):
+            dtype = _get_fp8_cache_dtype(cache_config.quant_policy)
+        elif cache_config.quant_policy in (QuantPolicy.INT4, QuantPolicy.INT8, QuantPolicy.TURBO_QUANT):
             dtype = torch.uint8
         return CacheDesc(shape=shape, dtype=dtype)
 
@@ -232,12 +282,22 @@ class CacheEngine:
     def get_quant_cache_descs(cls, k_cache_desc: CacheDesc, v_cache_desc: CacheDesc, model_config: ModelConfig,
                               cache_config: CacheConfig):
         """Get quant cache descs."""
-        if cache_config.quant_policy == 0:
+        if cache_config.quant_policy == QuantPolicy.NONE:
+            return []
+        if _is_fp8_quant_policy(cache_config.quant_policy):
+            # Regular FP8 KV cache uses fixed scalar scales from Attention, not
+            # per-token scale/zero cache tensors.
             return []
 
         dtype = model_config.dtype
-        key_scale_zero_shape = k_cache_desc.shape[:-1] + [2]
-        val_scale_zero_shape = v_cache_desc.shape[:-1] + [2]
+        # For quant_policy==QuantPolicy.TURBO_QUANT, K uses 4-bit quantization (has MSE norm and QJL norm),
+        # V uses 2-bit quantization (only has MSE norm)
+        if cache_config.quant_policy == QuantPolicy.TURBO_QUANT:
+            key_scale_zero_shape = k_cache_desc.shape[:-1] + [2]
+            val_scale_zero_shape = v_cache_desc.shape[:-1] + [1]
+        else:
+            key_scale_zero_shape = k_cache_desc.shape[:-1] + [2]
+            val_scale_zero_shape = v_cache_desc.shape[:-1] + [2]
         key_scale_zero_desc = CacheDesc(shape=key_scale_zero_shape, dtype=dtype)
         val_scale_zero_desc = CacheDesc(shape=val_scale_zero_shape, dtype=dtype)
         return [key_scale_zero_desc, val_scale_zero_desc]
@@ -248,7 +308,7 @@ class CacheEngine:
         if len(model_config.cache_shapes) == 0:
             return []
 
-        block_size = cache_config.block_size
+        block_size = cache_config.kernel_block_size
 
         descs = []
         for shape, dtype in model_config.cache_shapes:
@@ -262,7 +322,18 @@ class CacheEngine:
                         device: str):
         """Allocate caches."""
 
+        if cache_config.block_size < cache_config.kernel_block_size:
+            raise ValueError(
+                f'block_size {cache_config.block_size} must be greater than or equal to '
+                f'kernel_block_size {cache_config.kernel_block_size}.')
+        if cache_config.block_size % cache_config.kernel_block_size != 0:
+            raise ValueError(
+                f'block_size {cache_config.block_size} must be divisible by '
+                f'kernel_block_size {cache_config.kernel_block_size}.')
+
         num_layers = model_config.num_layers
+        kernel_blocks_per_kv = cache_config.block_size // cache_config.kernel_block_size
+        num_blocks *= kernel_blocks_per_kv
 
         # get all descs
         k_cache_desc = cls.get_k_cache_desc(model_config, cache_config, world_size)
@@ -290,6 +361,8 @@ class CacheEngine:
 
     def allocate_gpu_cache(self):
         """Allocate caches on GPU."""
+        # Non-CUDA device integrations patch the canonical "cuda" device path
+        # before reaching this layer, so keep using it here.
         mem_pool, caches = self.allocate_caches(
             num_blocks=self.num_gpu_blocks,
             model_config=self.model_config,
@@ -313,31 +386,6 @@ class CacheEngine:
         self.full_cpu_cache = mem_pool
         self.local_cpu_cache = list(zip(*caches))
         return self.local_cpu_cache
-
-    @staticmethod
-    def get_custom_cache_shape_impl(num_layers: int, num_blocks: int, block_size: int, shape: list[int]):
-        """Get single block shape."""
-        return (num_layers, num_blocks, block_size, *shape)
-
-    @staticmethod
-    def _allocate_single_custom_cache(shape: Sequence[int], dtype: torch.dtype, device: str):
-        """Allocate custom cache."""
-        return torch.empty(shape, dtype=dtype, device=device)
-
-    def allocate_custom_cache(self, device: str):
-        """Allocate custom caches on GPU."""
-        num_layers = self.model_config.num_layers
-        custom_caches = []
-        for shape, dtype in self.model_config.cache_shapes:
-            custom_shape = self.get_custom_cache_shape_impl(
-                num_layers=num_layers,
-                num_blocks=self.num_gpu_blocks,
-                block_size=self.block_size,
-                shape=shape,
-            )
-            custom_cache = self._allocate_single_custom_cache(shape=custom_shape, dtype=dtype, device=device)
-            custom_caches.append(custom_cache)
-        return custom_caches
 
     @torch.inference_mode()
     def _swap(self, src: list[torch.Tensor], dst: list[torch.Tensor], src_to_dst: dict[int, int]):
@@ -426,6 +474,8 @@ class CacheEngine:
         self.migration_backend_impl.p2p_connect(remote_engine_id, migration_conn_request[self.tp_rank])
 
     async def migrate(self, migration_execution_inputs: MigrationExecutionBatch):
+        if self.cache_config.block_size != self.cache_config.kernel_block_size:
+            raise RuntimeError('PD migration does not support block_size != kernel_block_size.')
 
         assignment_len = self.full_gpu_cache.element_size() * self.full_gpu_cache.size(-1)
         layer_stride = self.cache_config.num_gpu_blocks * assignment_len
@@ -466,6 +516,8 @@ class StateCacheEngine:
 
     def __init__(self, cache_config: CacheConfig):
         self.cache_config = cache_config
+        # Non-CUDA device integrations patch the canonical "cuda" device path
+        # before reaching this layer, so keep using it here.
         self.mem_pool, self._state_caches = self.allocate_caches(num_caches=cache_config.num_state_caches,
                                                                  state_shapes=cache_config.states_shapes,
                                                                  device='cuda')
@@ -513,23 +565,3 @@ class StateCacheEngine:
     def state_caches(self):
         """State caches."""
         return self._state_caches
-
-    def init_caches(self, idx: torch.Tensor, mask: torch.Tensor):
-        """Initialize state caches.
-
-        idx: indices of caches to be initialized.
-        mask: mask to indicate which idx to be initialized.
-        """
-        if idx is None:
-            return
-
-        if len(self._state_caches) <= 0:
-            return
-
-        num_caches = self.cache_config.num_state_caches
-
-        # get mask of all caches so we can perform inplace mask fill
-        cache_masks = torch.zeros((num_caches, ), dtype=torch.bool, device=idx.device)
-        cache_masks.index_copy_(0, idx, mask)
-        reshaped_mask = cache_masks.view((-1, ) + (1, ) * (self.mem_pool.dim() - 1))
-        self.mem_pool.masked_fill_(reshaped_mask, 0)

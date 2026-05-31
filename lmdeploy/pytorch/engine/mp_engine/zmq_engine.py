@@ -33,13 +33,15 @@ class ZMQMPEngine(MPEngine):
                  model_path: str,
                  engine_config: PytorchEngineConfig = None,
                  speculative_config: SpeculativeConfig = None,
+                 trust_remote_code: bool = False,
                  **kwargs) -> None:
         """Initialize mp engine."""
         from .zmq_rpc import AsyncRPCClient
         self.shared_dict = None
         self.port = None
         self.proc = None
-        self._start_mp_proc(model_path, engine_config, speculative_config=speculative_config, **kwargs)
+        self._start_mp_proc(model_path, engine_config, speculative_config=speculative_config,
+                            trust_remote_code=trust_remote_code, **kwargs)
 
         self.rpc_client = AsyncRPCClient(port=self.port)
 
@@ -94,6 +96,13 @@ class ZMQMPEngine(MPEngine):
         from lmdeploy.pytorch.engine import Engine
 
         from .zmq_rpc import AsyncRPCServer
+
+        # try rename the process
+        try:
+            import ctypes
+            ctypes.CDLL(None).prctl(15, b'ZMQMPEngine', 0, 0, 0)
+        except Exception as e:
+            logger.debug(f'Failed to rename MPEngine process: {e}')
 
         logger.setLevel(log_level)
 
@@ -172,10 +181,18 @@ class ZMQMPEngine(MPEngine):
         """Collective rpc call."""
         return await self.rpc_client.async_call(func, *args, **kwargs)
 
-    async def _collective_rpc_streaming_async(self, func, *args, **kwargs):
+    async def _collective_rpc_streaming_async(self, func: str, sess_event: asyncio.Event,  *args, **kwargs):
         """Collective rpc call."""
-        async for out in self.rpc_client.async_stream_call(func, *args, **kwargs):
+        async for out in self.rpc_client.async_stream_call(func, sess_event, *args, **kwargs):
             yield out
+
+    async def get_health_status(self):
+        """Get backend health status."""
+        if self.proc is None or not self.proc.is_alive():
+            return dict(alive=False,
+                        message='PyTorch ZMQ engine process is not alive.',
+                        schedule_metrics=None)
+        return await super().get_health_status()
 
     def close(self) -> None:
         """Close mp engine."""

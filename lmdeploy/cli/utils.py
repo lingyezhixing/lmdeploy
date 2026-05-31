@@ -267,11 +267,25 @@ class ArgumentHelper:
     def quant_policy(parser, default: int = 0):
         """Add argument quant_policy to parser."""
 
+        from lmdeploy.messages import QuantPolicy
+
+        _aliases = {p.name.lower(): p.value for p in QuantPolicy}
+        _aliases['fp8_e4m3'] = QuantPolicy.FP8.value
+
+        def _parse(x):
+            key = x.lower()
+            if key in _aliases:
+                return _aliases[key]
+            v = int(x)
+            if v not in list(QuantPolicy):
+                raise ValueError(f'invalid quant_policy: {x!r}')
+            return v
+
         return parser.add_argument('--quant-policy',
-                                   type=int,
-                                   default=0,
-                                   choices=[0, 4, 8],
-                                   help='Quantize kv or not. 0: no quant; 4: 4bit kv; 8: 8bit kv')
+                                   type=_parse,
+                                   default=default,
+                                   help='KV cache quant policy: none/int4/int8/fp8/fp8_e5m2/'
+                                   'turbo_quant (or 0/4/8/16/17/42). fp8 defaults to fp8_e4m3.')
 
     @staticmethod
     def rope_scaling_factor(parser):
@@ -404,7 +418,8 @@ class ArgumentHelper:
         return parser.add_argument('--calib-samples',
                                    type=int,
                                    default=128,
-                                   help='The number of samples for calibration')
+                                   help='The number of samples for calibration. '
+                                        'Define 0 to indicate the data free quantization.')
 
     @staticmethod
     def calib_seqlen(parser):
@@ -462,18 +477,20 @@ class ArgumentHelper:
     @staticmethod
     def reasoning_parser(parser):
         """Add reasoning parser to parser."""
-        from lmdeploy.serve.openai.reasoning_parser import ReasoningParserManager
+        legacy_names = ['qwen-qwq', 'intern-s1', 'deepseek-r1']
+        from lmdeploy.serve.parsers.reasoning_parser import ReasoningParserManager
         return parser.add_argument(
             '--reasoning-parser',
             type=str,
             default=None,
-            help=f'The registered reasoning parser name from {ReasoningParserManager.module_dict.keys()}. '
+            help=f'The registered reasoning parser name: {ReasoningParserManager.module_dict.keys()}. '
+            f'Legacy names: {legacy_names}. '
             'Default to None.')
 
     @staticmethod
     def tool_call_parser(parser):
         """Add tool call parser to parser."""
-        from lmdeploy.serve.openai.tool_parser import ToolParserManager
+        from lmdeploy.serve.parsers.tool_parser import ToolParserManager
 
         return parser.add_argument(
             '--tool-call-parser',
@@ -545,6 +562,19 @@ class ArgumentHelper:
                                    'it should be a multiple of 64. For Pytorch Engine, '
                                    'if Lora Adapter is specified, this parameter will '
                                    'be ignored')
+
+    @staticmethod
+    def kernel_block_size(parser):
+        """Add argument kernel_block_size to parser."""
+
+        return parser.add_argument('--kernel-block-size',
+                                   type=int,
+                                   default=-1,
+                                   help='The length of the token sequence in a k/v block for kernels. '
+                                   'Only supported by Pytorch Engine. '
+                                   'When set to a different value than --cache-block-seq-len, '
+                                   'memory allocators and prefix cache use --cache-block-seq-len '
+                                   'as the block size, while kernels use --kernel-block-size.')
 
     @staticmethod
     def enable_prefix_caching(parser):
@@ -763,6 +793,14 @@ class ArgumentHelper:
                                    default=None,
                                    choices=['uni', 'mp', 'ray'],
                                    help='The distributed executor backend for pytorch engine.')
+
+    @staticmethod
+    def trust_remote_code(parser):
+        """Add argument trust_remote_code to parser."""
+        return parser.add_argument('--trust-remote-code',
+                                   action='store_true',
+                                   default=False,
+                                   help='Whether to trust remote code from model repositories.')
 
 
 # adapted from https://github.com/vllm-project/vllm/blob/main/vllm/utils/__init__.py

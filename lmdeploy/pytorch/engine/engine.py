@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
+import ctypes
 import gc
 import os
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ import numpy as np
 import torch
 
 from lmdeploy.messages import PytorchEngineConfig, RequestMetrics, ResponseType, SpeculativeConfig
+from lmdeploy.pytorch import envs as _envs
 from lmdeploy.pytorch.disagg.config import EngineRole
 from lmdeploy.pytorch.disagg.conn.engine_conn import EngineP2PConnection
 from lmdeploy.pytorch.disagg.conn.protocol import (
@@ -32,6 +34,8 @@ from .request import Request, RequestManager, RequestType, Response
 logger = get_logger('lmdeploy')
 
 SeqList = list[SchedulerSequence]
+_INPUT_REQUEST_TYPES = {RequestType.ADD_SESSION, RequestType.ADD_MESSAGE}
+_SLEEPING_TAGS = {'weights', 'kv_cache'}
 
 
 @dataclass
@@ -94,7 +98,7 @@ class Engine(EngineBase):
         self,
         model_path: str,
         engine_config: PytorchEngineConfig = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         speculative_config: SpeculativeConfig = None,
     ) -> None:
         # make sure engine config exist
@@ -133,7 +137,7 @@ class Engine(EngineBase):
         misc_config = ConfigBuilder.build_misc_config(engine_config)
         # spec decode
         self.specdecode_config = ConfigBuilder.build_specdecode_config(model_path, speculative_config, engine_config,
-                                                                       cache_config)
+                                                                       cache_config, trust_remote_code)
 
         # build model agent
         self.executor = build_executor(
@@ -147,6 +151,7 @@ class Engine(EngineBase):
             distributed_executor_backend=engine_config.distributed_executor_backend,
             dtype=engine_config.dtype,
             specdecode_config=self.specdecode_config,
+            trust_remote_code=trust_remote_code,
         )
         self.executor.init()
 
@@ -181,10 +186,17 @@ class Engine(EngineBase):
         self.engine_config.num_gpu_blocks = self.cache_config.num_gpu_blocks
 
         self.req_manager = self._bind_request_manager()
+        # This state tracks only explicit Engine.sleep()/wakeup() calls. Do not
+        # infer sleeping from empty_init: empty_init still builds runtime
+        # resources and has its own weight-update workflow.
+        self._sleeping_tags = set()
+        self._multimodal_session_trim_count = max(0, _envs.multimodal_session_trim_count)
+        self._multimodal_session_end_count = 0
 
         # create main thread
         self.req_manager.set_main_loop_func(self.async_loop)
         self._loop_main = None
+        self._engine_loop = None
 
         # for PD Disaggregation
         # For migrating prefill request to decode engine
@@ -198,8 +210,8 @@ class Engine(EngineBase):
     def from_pretrained(cls,
                         pretrained_model_name_or_path: str,
                         engine_config: PytorchEngineConfig = None,
-                        trust_remote_code: bool = True,
                         speculative_config: SpeculativeConfig = None,
+                        trust_remote_code: bool = False,
                         **kwargs):
         """Lmdeploy python inference engine.
 
@@ -224,16 +236,16 @@ class Engine(EngineBase):
                 backend=backend,
                 model_path=pretrained_model_name_or_path,
                 engine_config=engine_config,
-                trust_remote_code=trust_remote_code,
                 speculative_config=speculative_config,
+                trust_remote_code=trust_remote_code
             )
         if len(kwargs) > 0:
             logger.debug(f'Get unexpected kwargs: {kwargs}')
         return cls(
             model_path=pretrained_model_name_or_path,
             engine_config=engine_config,
-            trust_remote_code=trust_remote_code,
             speculative_config=speculative_config,
+            trust_remote_code=trust_remote_code
         )
 
     def _download_adapters(self, adapters: dict[str, str], engine_config: PytorchEngineConfig):
@@ -305,12 +317,41 @@ class Engine(EngineBase):
                 for seq in session.sequences.values():
                     _resp: Response = getattr(seq, 'resp', None)
                     if _resp is not None:
-                        _resp.type = ResponseType.CANCEL
-                        _resp.is_done = True
-                        self.req_manager.response(_resp)
+                        self.req_manager.reject_request(_resp)
                 resp_type = ResponseType.SUCCESS
             if resp:
                 self._response(req.resp, resp_type)
+
+    @staticmethod
+    def _try_mem_trim():
+        """Try to trim memory."""
+        try:
+            gc.collect()
+            ctypes.CDLL('libc.so.6').malloc_trim(0)
+        except Exception as e:
+            logger.debug(f'Memory trim failed: {e}')
+
+    @staticmethod
+    def _has_multimodal_session(session) -> bool:
+        """Check whether session has multimodal history."""
+        for seq in session.sequences.values():
+            history_multimodals = getattr(seq, 'history_multimodals', None)
+            if history_multimodals is not None and not history_multimodals.empty():
+                return True
+        return False
+
+    def _maybe_trim_multimodal_session(self, has_multimodal: bool):
+        """Trim host memory after enough multimodal sessions have ended."""
+        trim_count = getattr(self, '_multimodal_session_trim_count', max(0, _envs.multimodal_session_trim_count))
+        if not has_multimodal or trim_count <= 0:
+            return
+
+        self._multimodal_session_end_count = getattr(self, '_multimodal_session_end_count', 0) + 1
+        if self._multimodal_session_end_count < trim_count:
+            return
+
+        self._multimodal_session_end_count = 0
+        self._try_mem_trim()
 
     def _on_end_session(self, reqs: list[Request], **kwargs):
         """On end session callback."""
@@ -443,13 +484,70 @@ class Engine(EngineBase):
         """Update params."""
         self.executor.update_params(request)
 
-    def sleep(self, level: int = 1):
+    def _block_new_inputs(self):
+        """Block new inference work from engine instances."""
+        logger.info('PyTorch engine is blocking new inference requests.')
+        self.req_manager.block_request_types(_INPUT_REQUEST_TYPES)
+
+    def _unblock_new_inputs(self):
+        """Allow inference work from engine instances."""
+        logger.info('PyTorch engine is allowing new inference requests.')
+        self.req_manager.unblock_request_types(_INPUT_REQUEST_TYPES)
+
+    def _cancel_and_end_all_sessions(self):
+        """Cancel active responses and remove all scheduler sessions."""
+        num_cancelled = 0
+        session_ids = list(self.scheduler.sessions.keys())
+        for session in list(self.scheduler.sessions.values()):
+            for seq in list(session.sequences.values()):
+                resp: Response = getattr(seq, 'resp', None)
+                if resp is None or resp.is_done:
+                    continue
+                self.req_manager.reject_request(resp, reason='engine sleep')
+                num_cancelled += 1
+
+        # Sleep releases KV cache, so every existing scheduler session becomes
+        # invalid even when the original request asked to preserve cache.
+        for session_id in session_ids:
+            self.end_session(session_id)
+        logger.info('PyTorch engine sleep cleanup cancelled %s active responses and ended %s sessions.',
+                    num_cancelled, len(session_ids))
+
+    async def sleep(self, level: int = 1):
         """Sleep."""
-        self.executor.sleep(level)
+        logger.info('PyTorch engine sleep requested: level=%s.', level)
+        # log sleep tags so we can resume at the right condition in wakeup.
+        self._sleeping_tags = _SLEEPING_TAGS.copy()
+        # block ADD_MESSAGE and ADD_SESSION
+        self._block_new_inputs()
+        if self._engine_loop is not None:
+            await self._engine_loop.drain_for_sleep()
+            logger.info('PyTorch engine loop drained for sleep.')
+        # cancel all remain sessions
+        self._cancel_and_end_all_sessions()
+        await self.executor.sleep(level)
+        logger.info('PyTorch engine entered sleep: level=%s, sleeping_tags=%s.', level, sorted(self._sleeping_tags))
 
     def wakeup(self, tags: list[str] | None = None):
         """Wakeup."""
-        self.executor.wakeup(tags)
+        wakeup_tags = tags
+        logger.info('PyTorch engine wakeup requested: tags=%s, sleeping_tags=%s.',
+                    wakeup_tags, sorted(self._sleeping_tags))
+        self.executor.wakeup(wakeup_tags)
+        if wakeup_tags is None:
+            self._sleeping_tags.clear()
+        else:
+            self._sleeping_tags.difference_update(wakeup_tags)
+        # The engine would resume only when all sleep tags have been cleared.
+        if not self._sleeping_tags:
+            # enable ADD_MESSAGE and ADD_SESSION
+            self._unblock_new_inputs()
+            if self._engine_loop is not None:
+                self._engine_loop.resume_from_sleep()
+            logger.info('PyTorch engine wakeup complete; inference requests are enabled.')
+        else:
+            logger.info('PyTorch engine partial wakeup; blocked tags=%s.',
+                        sorted(self._sleeping_tags))
 
     async def async_loop(self):
         engine_loop = None
@@ -460,6 +558,7 @@ class Engine(EngineBase):
 
             # create engine loop
             engine_loop = build_engine_loop(self)
+            self._engine_loop = engine_loop
             self.migration_event = engine_loop.migration_event
 
             # start engine loop
@@ -477,6 +576,7 @@ class Engine(EngineBase):
             logger.debug('Engine main loop finally cleanup.')
             if engine_loop is not None:
                 engine_loop.stop()
+            self._engine_loop = None
             self._loop_finally()
 
     def close(self):
@@ -533,7 +633,9 @@ class Engine(EngineBase):
     def end_session(self, session_id: int):
         """End session."""
         if session_id in self.scheduler.sessions:
+            has_multimodal = self._has_multimodal_session(self.scheduler.sessions[session_id])
             self.scheduler.end_session(session_id)
+            self._maybe_trim_multimodal_session(has_multimodal)
             return True
         return False
 
@@ -542,3 +644,39 @@ class Engine(EngineBase):
 
     def get_schedule_metrics(self):
         return self.scheduler.schedule_metrics
+
+    @staticmethod
+    def _health_check_tasks(tasks):
+        done_tasks = []
+        for task in list(tasks):
+            if task.done():
+                done_tasks.append(task.get_name())
+        return len(done_tasks) == 0, done_tasks
+
+    async def get_health_status(self) -> dict:
+        """Get lightweight health status.
+
+        Scheduler metrics alone can still be readable after runtime failure, so this also checks Engine-owned loop tasks
+        before returning metrics.
+        """
+        if not self.req_manager.is_loop_alive():
+            return dict(alive=False,
+                        message='PyTorch engine request loop is not alive.',
+                        schedule_metrics=None)
+
+        if self._loop_main is not None:
+            if self._loop_main.done():
+                return dict(alive=False,
+                            message='PyTorch engine main loop has stopped.',
+                            schedule_metrics=None)
+
+        if self._engine_loop is not None:
+            engine_loop_ok, done_tasks = self._health_check_tasks(self._engine_loop.tasks)
+            if not engine_loop_ok:
+                return dict(alive=False,
+                            message=f'PyTorch engine loop task has stopped: {done_tasks}.',
+                            schedule_metrics=None)
+
+        return dict(alive=True,
+                    message='PyTorch engine is healthy.',
+                    schedule_metrics=self.get_schedule_metrics())

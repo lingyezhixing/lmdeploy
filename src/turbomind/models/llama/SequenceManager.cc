@@ -5,10 +5,10 @@
 #include <ctime>
 #include <numeric>
 
+#include "src/turbomind/core/logger.h"
 #include "src/turbomind/kernels/attention/block.h"
 #include "src/turbomind/models/llama/BlockManager.h"
 #include "src/turbomind/models/llama/SequenceManager.h"
-#include "src/turbomind/utils/logger.h"
 
 // #include "dbg.h"
 
@@ -31,26 +31,36 @@ std::string vector2string(const std::vector<T>& data)
     return ss.str();
 }
 
-SequenceManager::SequenceManager(const ModelParam& model_param,
-                                 DataType          runtime_dtype,
-                                 int               cache_block_seq_len,
-                                 int               attn_tp_size,
-                                 int               max_batch_size,
-                                 double            block_count,
-                                 int               chunk_size,
-                                 bool              enable_prefix_caching,
-                                 int               rank,
-                                 int               attn_cp_size,
-                                 core::Allocator   allocator,
-                                 GetFreeMemSize    get_free_size):
+SequenceManager::SequenceManager(int                     head_dim,
+                                 int                     kv_head_num,
+                                 int                     num_layer,
+                                 const std::vector<int>& layer_types,
+                                 int                     quant_policy,
+                                 DataType                data_type,
+                                 DataType                runtime_dtype,
+                                 int                     linear_key_head_dim,
+                                 int                     linear_value_head_dim,
+                                 int                     linear_conv_kernel_dim,
+                                 int                     linear_num_key_heads,
+                                 int                     linear_num_value_heads,
+                                 int                     cache_block_seq_len,
+                                 int                     attn_tp_size,
+                                 int                     max_batch_size,
+                                 double                  block_count,
+                                 int                     chunk_size,
+                                 bool                    enable_prefix_caching,
+                                 int                     rank,
+                                 int                     attn_cp_size,
+                                 core::Allocator         allocator,
+                                 GetFreeMemSize          get_free_size):
     block_seq_len_(cache_block_seq_len), rank_(rank), attn_cp_size_(attn_cp_size)
 {
     TM_CHECK_GT(attn_tp_size, 0);
     TM_CHECK_GT(cache_block_seq_len, 0);
 
-    int cache_layer_num   = model_param.layer_num;
+    int cache_layer_num   = num_layer;
     int num_linear_layers = 0;
-    for (const auto& type : model_param.layer_types) {
+    for (const auto& type : layer_types) {
         if (type == 1) {
             --cache_layer_num;
             ++num_linear_layers;
@@ -61,50 +71,46 @@ SequenceManager::SequenceManager(const ModelParam& model_param,
 
     if (num_linear_layers > 0) {
 
-        const int key_head_dim =
-            model_param.linear_key_head_dim > 0 ? model_param.linear_key_head_dim : model_param.head_dim;
-        const int value_head_dim =
-            model_param.linear_value_head_dim > 0 ? model_param.linear_value_head_dim : model_param.head_dim;
-        const int d_conv      = model_param.linear_conv_kernel_dim > 0 ? model_param.linear_conv_kernel_dim : 4;
-        const int num_k_heads = model_param.linear_num_key_heads / attn_tp_size;
-        const int num_v_heads = model_param.linear_num_value_heads / attn_tp_size;
-        const int key_dim     = num_k_heads * key_head_dim;
-        const int value_dim   = num_v_heads * value_head_dim;
-        const int conv_dim    = key_dim * 2 + value_dim;
+        const int key_head_dim   = linear_key_head_dim > 0 ? linear_key_head_dim : head_dim;
+        const int value_head_dim = linear_value_head_dim > 0 ? linear_value_head_dim : head_dim;
+        const int d_conv         = linear_conv_kernel_dim > 0 ? linear_conv_kernel_dim : 4;
+        const int num_k_heads    = linear_num_key_heads / attn_tp_size;
+        const int num_v_heads    = linear_num_value_heads / attn_tp_size;
+        const int key_dim        = num_k_heads * key_head_dim;
+        const int value_dim      = num_v_heads * value_head_dim;
+        const int conv_dim       = key_dim * 2 + value_dim;
 
         TM_CHECK_GT(max_batch_size, 0);
-        pooled_conv_states_ = {{max_batch_size, num_linear_layers, d_conv, conv_dim}, model_param.data_type, kDEVICE};
-        pooled_recurrent_states_ = {{max_batch_size, num_linear_layers, num_v_heads, key_head_dim, value_head_dim},
-                                    model_param.linear_state_dtype,
-                                    kDEVICE};
+        pooled_conv_states_      = {{max_batch_size, num_linear_layers, d_conv, conv_dim}, data_type, kDEVICE};
+        pooled_recurrent_states_ = {
+            {max_batch_size, num_linear_layers, num_v_heads, key_head_dim, value_head_dim}, data_type, kDEVICE};
 
         free_linear_state_slots_.reserve(max_batch_size);
         for (int slot = max_batch_size - 1; slot >= 0; --slot) {
             free_linear_state_slots_.push_back(slot);
         }
-        TM_LOG_INFO("[SeqMgr] linear-state slot pool initialized: %d slots", max_batch_size);
+        TM_LOG_INFO("[SeqMgr] linear-state slot pool initialized: {} slots", max_batch_size);
         const auto   conv_one      = pooled_conv_states_.slice(0, 1).squeeze(0);
         const auto   recurrent_one = pooled_recurrent_states_.slice(0, 1).squeeze(0);
         const double mb            = 1.0 / (1024.0 * 1024.0);
-        TM_LOG_INFO("[SeqMgr] linear-state per slot: conv %.2f MB + recurrent %.2f MB = %.2f MB",
+        TM_LOG_INFO("[SeqMgr] linear-state per slot: conv {:.2f} MB + recurrent {:.2f} MB = {:.2f} MB",
                     conv_one.byte_size() * mb,
                     recurrent_one.byte_size() * mb,
                     (conv_one.byte_size() + recurrent_one.byte_size()) * mb);
-        TM_LOG_INFO("[SeqMgr] linear-state combined total: %.2f MB",
+        TM_LOG_INFO("[SeqMgr] linear-state combined total: {:.2f} MB",
                     (pooled_conv_states_.byte_size() + pooled_recurrent_states_.byte_size()) * mb);
     }
 
-    const int  dbits        = byte_size(runtime_dtype, 8);
-    const auto quant_policy = model_param.quant_policy;
-    const int  elem_bits    = quant_policy ? quant_policy : dbits;
+    const int dbits     = byte_size(runtime_dtype, 8);
+    const int elem_bits = quant_policy ? quant_policy : dbits;
 
     BlockConfig block_config{
-        (int)model_param.head_dim,
-        (int)model_param.kv_head_num / attn_tp_size,
+        head_dim,
+        kv_head_num,
         cache_block_seq_len,
         elem_bits == dbits ? 0 : dbits,
         elem_bits,
-        model_param.head_dim == 576,  // share kv
+        head_dim == 576,  // share kv
     };
 
     block::Layout layout{block_config};
@@ -115,20 +121,20 @@ SequenceManager::SequenceManager(const ModelParam& model_param,
     if (num_linear_layers > 0 && block_count < 1.) {
         const size_t linear_bytes = pooled_conv_states_.byte_size() + pooled_recurrent_states_.byte_size();
         const size_t target_bytes = static_cast<size_t>(free_before * block_count);
-        TM_LOG_INFO("[SeqMgr] Adjusting block_count: free_before %.2f MB, linear %.2f MB, target %.2f MB",
+        TM_LOG_INFO("[SeqMgr] Adjusting block_count: free_before {:.2f} MB, linear {:.2f} MB, target {:.2f} MB",
                     free_before / (1024. * 1024.),
                     linear_bytes / (1024. * 1024.),
                     target_bytes / (1024. * 1024.));
         if (target_bytes <= linear_bytes) {
-            TM_LOG_ERROR("[SeqMgr] Linear-state memory (%.2f MB) >= cache budget (%.2f MB). ",
+            TM_LOG_ERROR("[SeqMgr] Linear-state memory ({:.2f} MB) >= cache budget ({:.2f} MB). ",
                          linear_bytes / (1024. * 1024.),
                          target_bytes / (1024. * 1024.));
-            TM_CHECK(0)
-                << "Please decrease max_batch_size to reduce total linear state size or increase cache_max_entry_count.";
+            TM_LOG_FATAL(
+                "Please decrease max_batch_size to reduce total linear state size or increase cache_max_entry_count.");
         }
         const size_t cache_bytes = target_bytes - linear_bytes;
         block_count              = static_cast<double>(cache_bytes) / static_cast<double>(block_size);
-        TM_LOG_INFO("[SeqMgr] Adjusted block_count to %.0f", block_count);
+        TM_LOG_INFO("[SeqMgr] Adjusted block_count to {:.0f}", block_count);
     }
 
     block_manager_ = std::make_shared<BlockManager>(block_size, block_count, chunk_size, allocator, get_free_size);
@@ -136,7 +142,7 @@ SequenceManager::SequenceManager(const ModelParam& model_param,
     if (enable_prefix_caching) {
         block_trie_ = std::make_shared<BlockTrie>(block_config.block_len_, block_manager_);
     }
-    TM_LOG_WARNING("[SegMgr] prefix caching is %s", enable_prefix_caching ? "enabled" : "disabled");
+    TM_LOG_WARN("prefix caching is {}", enable_prefix_caching ? "enabled" : "disabled");
 }
 
 const Sequence* SequenceManager::Create(uint64_t id)
@@ -145,13 +151,13 @@ const Sequence* SequenceManager::Create(uint64_t id)
     auto     it = sequences_.find(id);
     if (it != sequences_.end()) {
         if (rank_ == 0) {
-            TM_LOG_WARNING("[SeqMgr][Create] Removing conflicting ID %llu", id);
+            TM_LOG_WARN("Removing conflicting ID {}", id);
         }
         Erase(it);
     }
     it = sequences_.emplace_hint(it, id, std::move(sequence));
     if (rank_ == 0) {
-        TM_LOG_INFO("[SeqMgr][Create] ID %llu", id);
+        TM_LOG_INFO("ID {}", id);
     }
     return &it->second;
 }
@@ -272,10 +278,10 @@ void SequenceManager::CachePrompt(const Sequences& sequences, int active_size)
             const auto& [block_ids, unique_ids] = block_trie_->Cache(seq, seq.prompt);
             if (rank_ == 0) {
                 // clang-format off
-                TM_LOG_INFO("[SeqMgr][CachePrompt] ID %llu, cached blocks %d, tokens %d", seq.id,
+                TM_LOG_INFO("ID {}, cached blocks {}, tokens {}", seq.id,
                             (int)block_ids.size(), (int)seq.prompt.size());
-                TM_LOG_DEBUG("[SeqMgr][CachePrompt] ID %llu, cached block_ids %s, unique_ids %s", seq.id,
-                             vector2string(block_ids).c_str(), vector2string(unique_ids).c_str());
+                TM_LOG_DEBUG("ID {}, cached block_ids {}, unique_ids {}", seq.id,
+                             vector2string(block_ids), vector2string(unique_ids));
                 // clang-format on
             }
             if (seq.cache_len >= seq.prompt.size()) {
@@ -295,10 +301,10 @@ void SequenceManager::CacheGeneration(const Sequence& seq)
 
     if (rank_ == 0) {
         // clang-format off
-        TM_LOG_INFO("[SeqMgr][CacheGeneration] ID %llu, cached blocks %d, tokens %d",
+        TM_LOG_INFO("ID {}, cached blocks {}, tokens {}",
                     seq.id, (int)block_ids.size(), (int)seq.tokens.size());
-        TM_LOG_DEBUG("[SeqMgr][CacheGeneration] ID %llu, cached block_ids %s, unique_ids %s", seq.id,
-                     vector2string(block_ids).c_str(), vector2string(unique_ids).c_str());
+        TM_LOG_DEBUG("ID {}, cached block_ids {}, unique_ids {}", seq.id,
+                     vector2string(block_ids), vector2string(unique_ids));
         // clang-format on
     }
 }
@@ -595,9 +601,9 @@ void SequenceManager::PrefixMatch(Sequences& sequences, const std::vector<int>& 
 
         if (rank_ == 0) {
             // clang-format off
-            TM_LOG_INFO("[SeqMgr][match] ID %llu, hit blocks %d, cache_len %d", seq.id, (int)block_ids.size(), seq.cache_len);
-            TM_LOG_DEBUG("[SeqMgr][match] ID %llu, hit block_ids %s, unique_ids %s", seq.id,
-                         vector2string(block_ids).c_str(), vector2string(unique_ids).c_str());
+            TM_LOG_INFO("ID {}, hit blocks {}, cache_len {}", seq.id, (int)block_ids.size(), seq.cache_len);
+            TM_LOG_DEBUG("ID {}, hit block_ids {}, unique_ids {}", seq.id,
+                         vector2string(block_ids), vector2string(unique_ids));
             // clang-format on
         }
 
@@ -616,10 +622,10 @@ void SequenceManager::PrefixMatch(Sequences& sequences, const std::vector<int>& 
 
         if (rank_ == 0) {
             // clang-format off
-            TM_LOG_INFO("[SeqMgr][match] ID %llu, after matching, blocks %d, cache_len %d",
+            TM_LOG_INFO("ID {}, after matching, blocks {}, cache_len {}",
                         seq.id, seq.blocks.size(), seq.cache_len);
-            TM_LOG_DEBUG("[SeqMgr][match] ID %llu, after matching, block_ids %s, unique_ids %s", seq.id,
-                         vector2string(seq.blocks).c_str(), vector2string(seq.block_unique_ids).c_str());
+            TM_LOG_DEBUG("ID {}, after matching, block_ids {}, unique_ids {}", seq.id,
+                         vector2string(seq.blocks), vector2string(seq.block_unique_ids));
             // clang-format on
         }
     }
@@ -694,7 +700,7 @@ auto SequenceManager::Materialize(Sequences             sequences,
 
     // release preempted blocks -> cached
     if (!schedule.victims.empty()) {
-        TM_LOG_INFO("[SeqMgr] #victim: %d", (int)schedule.victims.size());
+        TM_LOG_INFO("#victim: {}", (int)schedule.victims.size());
         for (const auto& p : schedule.victims) {
             UpdateAndSetUnlock(*p);
         }
@@ -723,7 +729,7 @@ auto SequenceManager::Materialize(Sequences             sequences,
         }
     }
 
-    // TM_LOG_ERROR("active: %4d, cached: %4d, free: %4d",
+    // TM_LOG_ERROR("active: {:4}, cached: {:4}, free: {:4}",
     //              block_manager_->active_count(),
     //              block_manager_->cached_count(),
     //              block_manager_->free_count());

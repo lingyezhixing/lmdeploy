@@ -8,10 +8,30 @@ from typing import Any
 import torch
 
 from lmdeploy.messages import PytorchEngineConfig, TurbomindEngineConfig, VisionConfig
-from lmdeploy.utils import get_logger
 from lmdeploy.vl.model.builder import load_vl_model
 
-logger = get_logger('lmdeploy')
+
+def _get_hf_config_mm_feature_dtype(hf_config) -> torch.dtype | None:
+    """Get multimodal feature dtype from the original Transformers config."""
+
+    def _to_torch_dtype(dtype):
+        if isinstance(dtype, torch.dtype):
+            return dtype
+        if isinstance(dtype, str):
+            return getattr(torch, dtype.removeprefix('torch.'), None)
+        return None
+
+    if hf_config is None:
+        return None
+
+    for config in (hf_config, getattr(hf_config, 'text_config', None), getattr(hf_config, 'llm_config', None)):
+        if config is None:
+            continue
+        for attr_name in ('dtype', 'torch_dtype'):
+            dtype = _to_torch_dtype(getattr(config, attr_name, None))
+            if isinstance(dtype, torch.dtype) and dtype.is_floating_point:
+                return dtype
+    return None
 
 
 def _raise_exception_on_finish(task: asyncio.Task) -> None:
@@ -24,11 +44,6 @@ def _raise_exception_on_finish(task: asyncio.Task) -> None:
         raise e
 
 
-def _accepts_arg(func, arg_name: str) -> bool:
-    """Check if a function accepts a specific keyword argument."""
-    return arg_name in inspect.signature(func).parameters
-
-
 class ImageEncoder:
     """Image encoder."""
 
@@ -38,24 +53,43 @@ class ImageEncoder:
         backend: str,
         vision_config: VisionConfig = None,
         backend_config: TurbomindEngineConfig | PytorchEngineConfig | None = None,
+        trust_remote_code: bool = False,
     ):
-        self.model = load_vl_model(model_path, backend, backend_config=backend_config)
+        self.model = load_vl_model(model_path,
+                                   backend,
+                                   backend_config=backend_config,
+                                   trust_remote_code=trust_remote_code)
+        self.mm_feature_dtype = _get_hf_config_mm_feature_dtype(getattr(self.model, 'hf_config', None))
+        if self.model is not None and hasattr(self.model, 'set_mm_feature_dtype'):
+            self.model.set_mm_feature_dtype(self.mm_feature_dtype)
         if vision_config is None:
             vision_config = VisionConfig()
         self.vision_config = vision_config
         self.max_batch_size = vision_config.max_batch_size
         self.executor = ThreadPoolExecutor(max_workers=1)
+        self._uses_new_preprocess = self._is_new_preprocess_api(self.model)
         torch.cuda.empty_cache()
+
+    @staticmethod
+    def _is_new_preprocess_api(model) -> bool:
+        """New-style preprocess takes `input_prompt` + `mm_processor_kwargs`,
+        legacy takes only `messages`."""
+        if model is None:
+            return False
+        sig = inspect.signature(model.preprocess).parameters
+        return 'input_prompt' in sig and 'mm_processor_kwargs' in sig
 
     async def preprocess(self,
                          messages: list[dict],
+                         input_prompt: str | list[int] | None = None,
                          mm_processor_kwargs: dict[str, Any] | None = None) -> list[dict]:
         """Preprocess multimodal data in the messages."""
-        if _accepts_arg(self.model.preprocess, 'mm_processor_kwargs'):
-            future = asyncio.get_event_loop().run_in_executor(self.executor, self.model.preprocess, messages,
-                                                              mm_processor_kwargs)
+        if self._uses_new_preprocess:
+            future = asyncio.get_event_loop().run_in_executor(
+                self.executor, self.model.preprocess, messages, input_prompt, mm_processor_kwargs)
         else:
-            future = asyncio.get_event_loop().run_in_executor(self.executor, self.model.preprocess, messages)
+            future = asyncio.get_event_loop().run_in_executor(
+                self.executor, self.model.preprocess, messages)
         future.add_done_callback(_raise_exception_on_finish)
         outputs = await future
         return outputs

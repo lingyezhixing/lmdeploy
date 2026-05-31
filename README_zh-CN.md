@@ -26,6 +26,7 @@ ______________________________________________________________________
 <details open>
 <summary><b>2026</b></summary>
 
+- \[2026/04\] PyPI 已为 LMDeploy 完成存储扩容，预编译安装包（wheels）上传已恢复。`v0.12.3` 已发布到 PyPI，可直接通过 `pip install lmdeploy` 安装。
 - \[2026/02\] 支持 [Qwen3.5](https://huggingface.co/collections/Qwen/qwen35)
 - \[2026/02\] 支持 [vllm-project/llm-compressor](https://github.com/vllm-project/llm-compressor) 4bit 对称和非对称量化。 具体操作指南详见[此处](./docs/zh_cn/quantization/llm_compressor.md)
 
@@ -225,15 +226,7 @@ conda activate lmdeploy
 pip install lmdeploy
 ```
 
-自 v0.3.0 版本起，默认预编译包基于 **CUDA 12** 编译。v0.10.2 及更高版本中，LMDeploy 不再支持 CUDA 11+。
-
-若使用 GeForce RTX 50 系列显卡，请按照如下方式安装基于 **CUDA 12.8** 编译的 LMDeploy 预编译包。
-
-```shell
-export LMDEPLOY_VERSION=0.12.2
-export PYTHON_VERSION=312
-pip install https://github.com/InternLM/lmdeploy/releases/download/v${LMDEPLOY_VERSION}/lmdeploy-${LMDEPLOY_VERSION}+cu128-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux2014_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu128
-```
+自 **v0.13.0** 起，**PyPI** 上默认预编译 wheel 基于 **CUDA 12.8** 构建，一般用户（含 GeForce RTX 50 系列）使用上方的 `pip install lmdeploy` 即可。
 
 ## 离线批处理
 
