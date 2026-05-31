@@ -116,7 +116,7 @@ class ChatRunner:
             reasoning_effort=parsed_request.reasoning_effort,
             do_preprocess=options.do_preprocess,
             adapter_name=adapter_name,
-            chat_template_kwargs=_chat_template_kwargs_from_request(parsed_request),
+            chat_template_kwargs=_chat_template_kwargs_from_request(parsed_request, server_context),
             input_ids=options.input_ids,
             media_io_kwargs=parsed_request.media_io_kwargs,
             mm_processor_kwargs=parsed_request.mm_processor_kwargs,
@@ -303,8 +303,15 @@ def _normalize_runner_gen_config_kwargs(
     return gen_config_kwargs
 
 
-def _chat_template_kwargs_from_request(request: ChatCompletionRequest) -> dict | None:
+def _chat_template_kwargs_from_request(request: ChatCompletionRequest,
+                                       server_context=None) -> dict | None:
     chat_template_kwargs = dict(request.chat_template_kwargs or {})
     if request.enable_thinking is not None and chat_template_kwargs.get('enable_thinking') is None:
         chat_template_kwargs['enable_thinking'] = request.enable_thinking
+    # Server-level default (from the --enable-thinking CLI flag). Request-level
+    # settings (chat_template_kwargs and the deprecated top-level field) always
+    # take precedence.
+    server_enable_thinking = getattr(server_context, 'enable_thinking', None)
+    if server_enable_thinking is not None and chat_template_kwargs.get('enable_thinking') is None:
+        chat_template_kwargs['enable_thinking'] = server_enable_thinking
     return chat_template_kwargs or None
