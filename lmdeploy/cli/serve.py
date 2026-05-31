@@ -89,6 +89,7 @@ class SubCliServe:
         # parsers
         ArgumentHelper.tool_call_parser(parser)
         ArgumentHelper.reasoning_parser(parser)
+        ArgumentHelper.enable_thinking(parser)
 
         # model args
         ArgumentHelper.revision(parser)
@@ -312,6 +313,7 @@ class SubCliServe:
                 tool_call_parser=args.tool_call_parser,
                 speculative_config=speculative_config,
                 task=args.task,
+                enable_thinking=args.enable_thinking,
             )
         else:
             from lmdeploy.serve.openai.launch_server import launch_server
@@ -345,6 +347,7 @@ class SubCliServe:
                 tool_call_parser=args.tool_call_parser,
                 speculative_config=speculative_config,
                 task=args.task,
+                enable_thinking=args.enable_thinking,
             )
 
     @staticmethod
