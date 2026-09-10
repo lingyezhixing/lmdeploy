@@ -15,6 +15,15 @@
 cmake_minimum_required(VERSION 3.25.2 FATAL_ERROR)
 cmake_policy(SET CMP0074 NEW)
 cmake_policy(SET CMP0104 OLD)
+
+# Allow restricting the CUDA archs via the CMAKE_CUDA_ARCHITECTURES env var
+# (e.g. set CMAKE_CUDA_ARCHITECTURES=70-real;89-real before building). Needed
+# on Windows where the python/cmake_build_extension build flow cannot inject
+# -D options into the cmake configure step.
+if(DEFINED ENV{CMAKE_CUDA_ARCHITECTURES})
+  set(CMAKE_CUDA_ARCHITECTURES $ENV{CMAKE_CUDA_ARCHITECTURES})
+endif()
+
 project(TurboMind LANGUAGES CXX CUDA)
 
 if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS "12.0")
