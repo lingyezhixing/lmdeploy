@@ -12,9 +12,11 @@ class TextModelBuilder(Builder):
     externally-owned ``ModelRoot`` sentinel handles as their
     ``text_model`` child during ``build()``.
 
-    Owns ``tok_embeddings`` (Tensor param) and ``output`` (LinearWeight
+    Owns the ``tok_embeddings`` (Tensor param) and ``output`` (LinearWeight
     child) commits on the ModelWeight via ``add_token_embeds`` /
-    ``add_lm_head``.
+    ``add_token_embeds_quant`` / ``add_token_embeds_quant4`` and
+    ``add_lm_head`` / ``add_lm_head_shared``, driven by
+    ``add_embedding_and_head``.
     """
 
     def __init__(self, config, ctx, *, root_handles,
@@ -53,9 +55,9 @@ class TextModelBuilder(Builder):
         """
         hidden = table.shape[-1]
         group = hidden // scales.shape[-1]
-        assert hidden % (self.tp.size * group) == 0, (
-            f'int8 embedding: hidden={hidden} not divisible by '
-            f'tp*group={self.tp.size * group}')
+        if hidden % (self.tp.size * group) != 0:
+            raise ValueError(f'int8 embedding: hidden={hidden} not divisible by '
+                             f'tp*group={self.tp.size * group}')
         self._add_tensor('tok_embeddings', table, split_side=SplitSide.OUTPUT)
         self._add_tensor('tok_embeddings_scale', scales,
                          split_side=SplitSide.OUTPUT)
@@ -68,9 +70,9 @@ class TextModelBuilder(Builder):
         """
         hidden = table.shape[-1] * 2
         group = hidden // scales.shape[-1]
-        assert hidden % (self.tp.size * group) == 0, (
-            f'int4 embedding: hidden={hidden} not divisible by '
-            f'tp*group={self.tp.size * group}')
+        if hidden % (self.tp.size * group) != 0:
+            raise ValueError(f'int4 embedding: hidden={hidden} not divisible by '
+                             f'tp*group={self.tp.size * group}')
         self._add_tensor('tok_embeddings', table, split_side=SplitSide.OUTPUT)
         self._add_tensor('tok_embeddings_scale', scales,
                          split_side=SplitSide.OUTPUT)

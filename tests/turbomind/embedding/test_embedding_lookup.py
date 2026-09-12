@@ -49,13 +49,3 @@ def test_lookup_mixed_dtype_matches_reference(out_dtype, table_dtype):
     embedding_lookup(out, ids, table)
     ref = embedding_lookup_ref(ids, table, out_dtype)
     torch.testing.assert_close(out, ref, atol=0, rtol=0)
-
-
-def test_lookup_bf16_table_fp16_out_is_exact():
-    torch.manual_seed(0)
-    vocab, dim, num = 512, 2560, 17
-    table = (torch.randn(vocab, dim, device='cuda') * 0.05).to(torch.bfloat16)
-    ids = torch.randint(0, vocab, (num,), dtype=torch.int32, device='cuda')
-    out = torch.empty(num, dim, dtype=torch.float16, device='cuda')
-    embedding_lookup(out, ids, table)
-    assert torch.equal(out, table[ids].to(torch.float16))

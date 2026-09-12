@@ -87,6 +87,11 @@ class ChatRunner:
         consumption."""
         options = options or ChatRunnerOptions()
         parser_cls = server_context.response_parser_cls
+        # The response parser reads `enable_thinking` from the request, so the
+        # server-level default must be merged before it is constructed.
+        chat_template_kwargs = _chat_template_kwargs_from_request(request, server_context)
+        if chat_template_kwargs:
+            request = request.model_copy(update={'chat_template_kwargs': chat_template_kwargs})
 
         try:
             if request.tool_choice == 'required' and not parser_cls.supports_required_tool_choice:
@@ -116,7 +121,7 @@ class ChatRunner:
             reasoning_effort=parsed_request.reasoning_effort,
             do_preprocess=options.do_preprocess,
             adapter_name=adapter_name,
-            chat_template_kwargs=_chat_template_kwargs_from_request(parsed_request, server_context),
+            chat_template_kwargs=chat_template_kwargs,
             input_ids=options.input_ids,
             media_io_kwargs=parsed_request.media_io_kwargs,
             mm_processor_kwargs=parsed_request.mm_processor_kwargs,

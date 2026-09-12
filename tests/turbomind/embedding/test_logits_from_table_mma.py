@@ -11,7 +11,7 @@ from .turbomind_embedding import logits_from_table
 
 pytestmark = [
     pytest.mark.skipif(not torch.cuda.is_available(), reason='cuda'),
-    pytest.mark.skipif(torch.cuda.get_device_capability() < (8, 0), reason='sm80+'),
+    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0), reason='sm80+'),
 ]
 
 DTYPES = [pytest.param(torch.bfloat16, id='bf16'), pytest.param(torch.float16, id='fp16')]

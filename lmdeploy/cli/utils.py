@@ -511,18 +511,15 @@ class ArgumentHelper:
         def _str_to_bool_or_none(val):
             if val is None or val == '':
                 return None
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                low = val.lower()
-                if low in ('true', '1'):
-                    return True
-                if low in ('false', '0'):
-                    return False
-                if low in ('none', 'null'):
-                    return None
-            raise ValueError(f'Invalid value for --enable-thinking: {val!r}. '
-                             'Expected True/False/1/0 or omit for no default.')
+            low = val.lower()
+            if low in ('true', '1'):
+                return True
+            if low in ('false', '0'):
+                return False
+            if low in ('none', 'null'):
+                return None
+            raise argparse.ArgumentTypeError(f'Invalid value for --enable-thinking: {val!r}. '
+                                             'Expected True/False/1/0 or omit for no default.')
 
         return parser.add_argument(
             '--enable-thinking',

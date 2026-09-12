@@ -5,11 +5,18 @@ The pytorch backend cannot output last hidden states (embedding) and drops
 an engine is created.
 """
 import asyncio
+import inspect
 
 import pytest
 
 from lmdeploy.archs import get_task
 from lmdeploy.serve.core import AsyncEngine
+
+
+def test_get_task_keeps_upstream_positional_contract():
+    params = inspect.signature(get_task).parameters
+    assert list(params) == ['backend', 'model_path', 'trust_remote_code', 'backend_config', 'task']
+    assert params['task'].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 @pytest.mark.parametrize('task', ['embed', 'rerank'])

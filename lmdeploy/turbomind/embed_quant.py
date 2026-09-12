@@ -53,12 +53,12 @@ def read_sidecar_meta(model_dir: str) -> dict:
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f'malformed {meta_path(model_dir)}: {e}; regenerate with '
-            f'scripts/quantize_embedding.py --format int8') from e
+            f'scripts/quantize_embedding.py') from e
     if meta.get('version') != SIDECAR_VERSION:
         raise RuntimeError(
             f'unsupported embed_quant.json version {meta.get("version")} in '
             f'{model_dir}; regenerate with '
-            f'scripts/quantize_embedding.py --format int8')
+            f'scripts/quantize_embedding.py')
     fmt = meta.get('table_format')
     if fmt in LEGACY_FORMAT_ALIASES or (fmt is None and meta.get('bits') == 16):
         fmt = 'native'
@@ -66,7 +66,7 @@ def read_sidecar_meta(model_dir: str) -> dict:
     if fmt not in TABLE_FORMATS:
         raise RuntimeError(
             f'unsupported embed_quant.json table_format {fmt!r} in {model_dir}; '
-            f'regenerate with scripts/quantize_embedding.py --format int8')
+            f'regenerate with scripts/quantize_embedding.py')
     return meta
 
 
@@ -95,6 +95,21 @@ def find_embed_key(model_dir: str, override: str | None = None) -> str:
         f'known: {EMBED_KEY_PATTERNS}')
 
 
+def find_embed_file(model_dir: str, embed_key: str) -> str:
+    """Return the safetensors shard that stores ``embed_key``."""
+    from safetensors import safe_open
+    for name in sorted(os.listdir(model_dir)):
+        if not name.endswith('.safetensors') or name == SIDECAR_NAME:
+            continue
+        path = osp.join(model_dir, name)
+        with safe_open(path, 'pt') as f:
+            if embed_key in f.keys():
+                return path
+    raise RuntimeError(
+        f'embedding tensor {embed_key!r} not found in any safetensors '
+        f'under {model_dir}')
+
+
 def quantize_int8_sym(x: torch.Tensor, group: int = GROUP_DEFAULT):
     *lead, hidden = x.shape
     ng = hidden // group
@@ -121,12 +136,19 @@ def quantize_int4_simple(x: torch.Tensor, group: int = GROUP_DEFAULT):
     xg = x.reshape(n, ng, group).float()
     mn = xg.amin(dim=-1)
     mx = xg.amax(dim=-1)
-    scale = ((mx - mn) / 15.0).clamp_min(1e-8)
-    zp = torch.round(-mn / scale).clamp_(0, 15).to(torch.uint8)
+    rng = mx - mn
+    scale = (rng / 15.0).clamp_min(1e-8)
+    # A constant group would otherwise get a near-zero scale and a saturated
+    # zero point, dequantizing to ~0 instead of the constant.
+    degenerate = rng < 1e-8
+    scale = torch.where(degenerate, (mx.abs() / 15.0).clamp_min(1e-8), scale)
+    zp = torch.where(degenerate,
+                     torch.where(mx < 0, torch.full_like(mx, 15.0), torch.zeros_like(mx)),
+                     torch.round(-mn / scale).clamp_(0, 15))
     q = torch.round(xg / scale.unsqueeze(-1) + zp.unsqueeze(-1)).clamp_(0, 15).float()
     q = q.reshape(n, k).to(torch.uint8)
     packed = q[:, 0::2] | (q[:, 1::2] << 4)
-    return packed.contiguous(), scale.to(torch.bfloat16), zp
+    return packed.contiguous(), scale.to(torch.bfloat16), zp.to(torch.uint8)
 
 
 def dequant_int4_simple(q: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor,
@@ -155,11 +177,11 @@ def quantize_table(x: torch.Tensor, fmt: str):
 
 def write_sidecar(model_dir: str, embed_key: str, table_format: str,
                   tensors: dict, *, head_from_embed: bool, qa: dict | None = None) -> None:
-    assert table_format in TABLE_FORMATS, table_format
+    if table_format not in TABLE_FORMATS:
+        raise ValueError(f'unsupported embed quant table format: {table_format!r}')
     tensors = dict(tensors)
     if head_from_embed:
         tensors[SHARED_HEAD_KEY] = torch.ones(1, dtype=torch.uint8)
-    save_file({k: v.contiguous() for k, v in tensors.items()}, sidecar_path(model_dir))
     meta = {
         'version': SIDECAR_VERSION,
         'embed_key': embed_key,
@@ -170,8 +192,19 @@ def write_sidecar(model_dir: str, embed_key: str, table_format: str,
         'created': datetime.now(timezone.utc).isoformat(),
         'qa': qa or {},
     }
-    with open(meta_path(model_dir), 'w') as f:
-        json.dump(meta, f, indent=2)
+    tmp_tensors = sidecar_path(model_dir) + '.tmp'
+    tmp_meta = meta_path(model_dir) + '.tmp'
+    try:
+        save_file({k: v.contiguous() for k, v in tensors.items()}, tmp_tensors)
+        os.replace(tmp_tensors, sidecar_path(model_dir))
+        with open(tmp_meta, 'w') as f:
+            json.dump(meta, f, indent=2)
+        os.replace(tmp_meta, meta_path(model_dir))
+    except Exception:
+        for tmp in (tmp_tensors, tmp_meta):
+            if osp.isfile(tmp):
+                os.remove(tmp)
+        raise
 
 
 def load_sidecar_tensors(model_dir: str) -> dict:
@@ -206,13 +239,15 @@ def resolve_embed_head(*, tie: bool, sidecar_format: str | None, mode: str, fmt:
                              error=f'embed head: invalid --embed-head {mode!r}')
     if not tie or mode == 'off':
         return EmbedHeadPlan('native', '', 'untied' if not tie else '--embed-head off')
-    if sidecar_format is not None:
-        return EmbedHeadPlan('sidecar', sidecar_format, 'offline sidecar')
-    if fmt not in ('native', 'int8', 'int4'):
+    if fmt not in TABLE_FORMATS:
         return EmbedHeadPlan('error', '', 'invalid format',
                              error=f'embed head: invalid --embed-head-format {fmt!r}; '
                                    'valid values: native, int8, int4')
-    quantized = fmt in ('int8', 'int4')
+    if sidecar_format is not None and sidecar_format not in TABLE_FORMATS:
+        return EmbedHeadPlan('error', '', 'invalid sidecar format',
+                             error=f'embed head: invalid sidecar table format '
+                                   f'{sidecar_format!r}; regenerate the sidecar')
+    quantized = (sidecar_format or fmt) in ('int8', 'int4')
     constraints = []
     if sm_version < 80:
         constraints.append(f'SM{sm_version} < SM80 (mma head needs SM80+)')
@@ -226,11 +261,13 @@ def resolve_embed_head(*, tie: bool, sidecar_format: str | None, mode: str, fmt:
         constraints.append(f'hidden {hidden} % 128 != 0 (int8/int4 group 128)')
     if constraints:
         reason = '; '.join(constraints)
-        if mode == 'on' or quantized:
+        if mode == 'on' or (quantized and sidecar_format is None):
             return EmbedHeadPlan('error', '', reason,
                                  error=f'embed head: cannot share ({reason}); '
                                        'set --embed-head off or regenerate an offline sidecar')
         return EmbedHeadPlan('native', '', reason)
+    if sidecar_format is not None:
+        return EmbedHeadPlan('sidecar', sidecar_format, 'offline sidecar')
     if quantized:
         return EmbedHeadPlan('shared_quant', fmt, f'online {fmt}')
     return EmbedHeadPlan('shared', 'native', 'shared native')

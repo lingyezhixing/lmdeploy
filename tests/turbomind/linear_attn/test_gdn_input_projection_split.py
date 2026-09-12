@@ -28,13 +28,13 @@ class FakeQuantFormat(WeightFormat):
 
 class ProbeDeltaNetBuilder(DeltaNetBuilder):
 
-    def __init__(self, *, num_k_heads=2, num_v_heads=2, tp_size=1):
+    def __init__(self, *, num_k_heads=2, num_v_heads=2):
         self.config = SimpleNamespace(
             num_k_heads=num_k_heads,
             num_v_heads=num_v_heads,
             data_type=torch.float16,
         )
-        self.tp = SimpleNamespace(size=tp_size)
+        self.tp = SimpleNamespace(size=1)
         self.committed = []
 
     def _add_linear(self, name, linear, split_side=None):

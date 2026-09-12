@@ -99,10 +99,10 @@ class FakePrefix:
 
 def _model_dir(tmp_path, with_sidecar):
     (tmp_path / 'config.json').write_text(json.dumps({'tie_word_embeddings': True}))
-    save_file({'model.embed_tokens.weight': torch.zeros(4, 8, dtype=torch.bfloat16)},
+    save_file({'model.embed_tokens.weight': torch.zeros(4, 128, dtype=torch.bfloat16)},
               str(tmp_path / 'model.safetensors'))
     if with_sidecar:
-        save_file({'model.embed_tokens.weight_i8': torch.zeros(4, 8, dtype=torch.int8),
+        save_file({'model.embed_tokens.weight_i8': torch.zeros(4, 128, dtype=torch.int8),
                    'model.embed_tokens.weight_i8_scale': torch.ones(4, 1, dtype=torch.bfloat16)},
                   str(tmp_path / 'embed_quant.safetensors'))
         (tmp_path / 'embed_quant.json').write_text(json.dumps(
@@ -111,9 +111,9 @@ def _model_dir(tmp_path, with_sidecar):
 
 def _model_dir_shared(tmp_path):
     (tmp_path / 'config.json').write_text(json.dumps({'tie_word_embeddings': True}))
-    save_file({'model.embed_tokens.weight': torch.zeros(4, 8, dtype=torch.bfloat16)},
+    save_file({'model.embed_tokens.weight': torch.zeros(4, 128, dtype=torch.bfloat16)},
               str(tmp_path / 'model.safetensors'))
-    save_file({'model.embed_tokens.weight_i8': torch.zeros(4, 8, dtype=torch.int8),
+    save_file({'model.embed_tokens.weight_i8': torch.zeros(4, 128, dtype=torch.int8),
                'model.embed_tokens.weight_i8_scale': torch.ones(4, 1, dtype=torch.bfloat16),
                'lm_head.weight_from_embed': torch.ones(1, dtype=torch.uint8)},
               str(tmp_path / 'embed_quant.safetensors'))
@@ -132,7 +132,7 @@ def test_quantized_branch(tmp_path):
     pfx = Prefix(create_checkpoint(str(tmp_path)))
     b, m = FakeBuilder(), FakeModel(pfx)
     add_embedding_and_head(m, b, pfx, 'model.embed_tokens.weight', tie=True)
-    assert b.calls[0] == ('embed_q', (4, 8), (4, 1))
+    assert b.calls[0] == ('embed_q', (4, 128), (4, 1))
     assert ('head_shared',) in b.calls
     assert ('head',) not in b.calls
 
@@ -142,7 +142,7 @@ def test_plain_branch(tmp_path):
     pfx = Prefix(create_checkpoint(str(tmp_path)))
     b, m = FakeBuilder(), FakeModel(pfx, _resolver(mode='off'))
     add_embedding_and_head(m, b, pfx, 'model.embed_tokens.weight', tie=True)
-    assert b.calls == [('embed', (4, 8), 'torch.bfloat16'), ('head',)]
+    assert b.calls == [('embed', (4, 128), 'torch.bfloat16'), ('head',)]
     assert m._pfx.prefix == 'model.embed_tokens'
 
 
@@ -151,7 +151,7 @@ def test_shared_head_branch(tmp_path):
     pfx = Prefix(create_checkpoint(str(tmp_path)))
     b, m = FakeBuilder(), FakeModel(pfx)
     add_embedding_and_head(m, b, pfx, 'model.embed_tokens.weight', tie=True)
-    assert ('embed_q', (4, 8), (4, 1)) in b.calls
+    assert ('embed_q', (4, 128), (4, 1)) in b.calls
     assert ('head_shared',) in b.calls
     assert ('head',) not in b.calls
 
@@ -196,8 +196,6 @@ def test_untied_sidecar_quantizes_lookup_only(fmt):
 
 
 def test_shared_head_success_sets_flag():
-    from types import SimpleNamespace
-
     from lmdeploy.turbomind.builders.text_model import TextModelBuilder
     builder = TextModelBuilder.__new__(TextModelBuilder)
     builder.tp = SimpleNamespace(size=1)
@@ -207,8 +205,6 @@ def test_shared_head_success_sets_flag():
 
 
 def test_tp_guard():
-    from types import SimpleNamespace
-
     from lmdeploy.turbomind.builders.text_model import TextModelBuilder
     builder = TextModelBuilder.__new__(TextModelBuilder)
     builder.tp = SimpleNamespace(size=2)
@@ -245,9 +241,9 @@ def test_untied_head_uses_head_key(tmp_path):
 
 def test_int4_shared_branch(tmp_path):
     (tmp_path / 'config.json').write_text(json.dumps({'tie_word_embeddings': True}))
-    save_file({'model.embed_tokens.weight': torch.zeros(4, 8, dtype=torch.bfloat16)},
+    save_file({'model.embed_tokens.weight': torch.zeros(4, 128, dtype=torch.bfloat16)},
               str(tmp_path / 'model.safetensors'))
-    save_file({'model.embed_tokens.weight_i4': torch.zeros(4, 4, dtype=torch.uint8),
+    save_file({'model.embed_tokens.weight_i4': torch.zeros(4, 64, dtype=torch.uint8),
                'model.embed_tokens.weight_i4_scale': torch.ones(4, 1, dtype=torch.bfloat16),
                'model.embed_tokens.weight_i4_zero': torch.zeros(4, 1, dtype=torch.uint8),
                'lm_head.weight_from_embed': torch.ones(1, dtype=torch.uint8)},
@@ -257,7 +253,7 @@ def test_int4_shared_branch(tmp_path):
     pfx = Prefix(create_checkpoint(str(tmp_path)))
     b, m = FakeBuilder(), FakeModel(pfx)
     add_embedding_and_head(m, b, pfx, 'model.embed_tokens.weight', tie=True)
-    assert ('embed_q4', (4, 4), (4, 1), (4, 1)) in b.calls
+    assert ('embed_q4', (4, 64), (4, 1), (4, 1)) in b.calls
     assert ('head_shared',) in b.calls
 
 
@@ -374,7 +370,7 @@ def test_env_disable_keeps_legacy_path(tmp_path, monkeypatch):
     pfx = Prefix(create_checkpoint(str(tmp_path)))
     b, m = FakeBuilder(), FakeModel(pfx)
     add_embedding_and_head(m, b, pfx, 'model.embed_tokens.weight', tie=True)
-    assert b.calls == [('embed', (4, 8), 'torch.bfloat16'), ('head',)]
+    assert b.calls == [('embed', (4, 128), 'torch.bfloat16'), ('head',)]
     assert m._pfx.prefix == 'model.embed_tokens'
 
 
@@ -484,7 +480,7 @@ def test_build_releases_staged_tensor():
 
 def test_native_sidecar_shared_branch(tmp_path):
     (tmp_path / 'config.json').write_text(json.dumps({'tie_word_embeddings': True}))
-    save_file({'model.embed_tokens.weight': torch.zeros(4, 8, dtype=torch.bfloat16)},
+    save_file({'model.embed_tokens.weight': torch.zeros(4, 128, dtype=torch.bfloat16)},
               str(tmp_path / 'model.safetensors'))
     save_file({'lm_head.weight_from_embed': torch.ones(1, dtype=torch.uint8)},
               str(tmp_path / 'embed_quant.safetensors'))
@@ -493,7 +489,7 @@ def test_native_sidecar_shared_branch(tmp_path):
     pfx = Prefix(create_checkpoint(str(tmp_path)))
     b, m = FakeBuilder(), FakeModel(pfx)
     add_embedding_and_head(m, b, pfx, 'model.embed_tokens.weight', tie=True)
-    assert b.calls == [('embed', (4, 8), 'torch.bfloat16'), ('head_shared',)]
+    assert b.calls == [('embed', (4, 128), 'torch.bfloat16'), ('head_shared',)]
 
 
 def test_native_shared_fp32_table_logs_engine_dtype(tmp_path, monkeypatch):
@@ -508,3 +504,24 @@ def test_native_shared_fp32_table_logs_engine_dtype(tmp_path, monkeypatch):
     assert b.calls == [('embed', (16, 16), 'torch.float32'), ('head_shared',)]
     infos = [r.getMessage() for r in records if r.levelno == logging.INFO]
     assert any('native table dtype torch.float32' in m for m in infos)
+
+
+class _FakeKeyPfx:
+
+    def __init__(self, keys):
+        self._keys = set(keys)
+
+    def has(self, name='', sep='.'):
+        return name in self._keys
+
+
+def test_text_key_prefix_nested_checkpoint():
+    from lmdeploy.turbomind.models.qwen3_5 import _text_key_prefix
+    pfx = _FakeKeyPfx({'model.language_model.embed_tokens.weight'})
+    assert _text_key_prefix(pfx) == 'model.language_model'
+
+
+def test_text_key_prefix_flat_checkpoint():
+    from lmdeploy.turbomind.models.qwen3_5 import _text_key_prefix
+    pfx = _FakeKeyPfx({'model.embed_tokens.weight'})
+    assert _text_key_prefix(pfx) == 'model'

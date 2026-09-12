@@ -124,9 +124,10 @@ def check_vl_llm(backend: str, config: dict) -> bool:
 
 def get_task(backend: str,
              model_path: str,
-             task: str = 'llm',
              trust_remote_code: bool = False,
-             backend_config: PytorchEngineConfig | TurbomindEngineConfig | None = None):
+             backend_config: PytorchEngineConfig | TurbomindEngineConfig | None = None,
+             *,
+             task: str = 'llm'):
     """Get pipeline type and pipeline class from model config."""
     from lmdeploy.serve.core import AsyncEngine
 

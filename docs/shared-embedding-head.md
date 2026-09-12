@@ -1,6 +1,6 @@
 # 共享词表与融合输出头（TurboMind 单表方案）
 
-本文档合并并取代 `docs/superpowers/` 下的全部设计、计划与结果记录，内容以当前代码为准。
+本文档是共享词表方案的唯一说明，内容以当前代码为准。
 适用对象：使用 tied embeddings 的 LLM / Embedding 模型（TurboMind 后端；Qwen3 / Qwen3.5 系列已实测）。
 文档语言为中文；代码标识符、路径与日志保持英文原文。
 
@@ -10,7 +10,7 @@
 
 问题：
 
-- tied 模型（`tie_word_embeddings: true`）的输入词表与输出头共用同一张权重，但加载器会把同一张表提交两次：`tok_embeddings` 一份、`lm_head` 一份（`lmdeploy/turbomind/models/utils.py`、`builders/_base.py`），4B 模型多耗一张表（bf16 约 740 MiB / 1.27 GB）。
+- tied 模型（`tie_word_embeddings: true`）的输入词表与输出头共用同一张权重，但加载器会把同一张表提交两次：`tok_embeddings` 一份、`lm_head` 一份（`lmdeploy/turbomind/models/utils.py`、`builders/_base.py`），4B 模型多耗一张表（bf16 表约 740 MiB）。
 - 输出头是一次 `[tokens, hidden] x [hidden, vocab]` 的大 GEMM，显存与带宽开销大。
 
 方案（本实现）：
@@ -27,7 +27,7 @@
 | 选项 | 取值 | 默认 | 含义 |
 |---|---|---|---|
 | `--embed-head` | `auto` / `on` / `off` | `auto` | tied 模型是否启用单表共享：`auto` 满足条件时共享、否则回退并记录原因；`on` 要求共享；`off` 走旧的双份路径 |
-| `--embed-head-format` | `native` / `int8` / `int4` | `native` | 共享表的存储格式：`native` 保留检查点 dtype（bf16 就 bf16、fp16 就 fp16，无转换）；`int8`/`int4` 在加载时量化 |
+| `--embed-head-format` | `native` / `int8` / `int4` | `native` | 共享表的存储格式：`native` 保留检查点 dtype（bf16 就 bf16、fp16 就 fp16，无转换）；`int8`/`int4` 在加载时量化（存在 sidecar 时由 sidecar 格式覆盖，仅告警） |
 | 环境变量 `LMDEPLOY_DISABLE_EMBED_QUANT=1` | — | 未设置 | 强制回退旧路径（等价于 `--embed-head off`） |
 
 配置对象：`TurbomindEngineConfig.embed_head` / `.embed_head_format`（`lmdeploy/messages.py`），CLI 在 chat 与 serve 均可用（`lmdeploy/cli/utils.py`）。
@@ -45,10 +45,10 @@
 1. `LMDEPLOY_DISABLE_EMBED_QUANT=1` → 旧路径（`native`）；
 2. 非法模式 → 报错；
 3. 非 tied 或 `--embed-head off` → 旧路径；
-4. **存在 sidecar → 使用 sidecar**（离线优先级最高；`--embed-head-format` 与之冲突时仅告警一行，sidecar 胜出）；
-5. 非法格式（如已移除的 `bf16`/`fp16`）→ 报错并列出合法值；
-6. 约束检查：`SM >= 80`、`TP == 1`、引擎 dtype ∈ {fp16, bf16}、`hidden % 16 == 0`（量化还需 `hidden % 128 == 0`）；
-   - 不满足时：`on` 或显式 `int8/int4` → **响亮报错**（附约束与补救建议）；`auto` → 回退旧路径并记录一行原因；
+4. 非法 `--embed-head-format` / 非法 sidecar 格式 → 报错并列出合法值；
+5. 约束检查：`SM >= 80`、`TP == 1`、引擎 dtype ∈ {fp16, bf16}、`hidden % 16 == 0`（sidecar 或量化格式还需 `hidden % 128 == 0`）；
+   - 不满足时：`on` 或显式在线量化（`--embed-head-format int8/int4`）→ **响亮报错**（附约束与补救建议）；`auto` → 回退旧路径并记录一行原因（sidecar 在 `auto` 下同样回退）；
+6. **存在 sidecar → 使用 sidecar**（离线优先级最高；与 `--embed-head-format` 冲突时仅告警一行，sidecar 胜出）；
 7. 通过：`int8/int4` → `shared_quant`（在线量化）；`native` → `shared`（保持检查点 dtype）。
 
 每次决策输出一行 INFO 日志，例如：
@@ -89,7 +89,8 @@ embed head: native (SM70 < SM80 (mma head needs SM80+))
 - 旧元数据 `table_format: bf16|fp16` 或缺失但 `bits == 16` 在读取时归一化为 `native`；
 - `native` 档只写哨兵与元数据，**不复制表数据**；
 - 版本不是 2 或未知格式会报错并提示用脚本重新生成；
-- `--embed-head off` 或环境开关置位时 sidecar 不会被合并。
+- `--embed-head off` 或环境开关置位时 sidecar 不会被合并（`embed_quant.safetensors` 也绝不会被当作普通权重分片扫描）；
+- sidecar 同样受 §3 的约束检查（`auto` 不满足时回退旧路径，`on` 报错）。
 
 ---
 
@@ -101,8 +102,8 @@ python scripts/quantize_embedding.py --model <模型目录> --format native|int8
 
 - 默认 `native`：仅要求 tied，写哨兵-only sidecar；
 - `--bits {16,8,4}` 为已弃用别名（16→native、8→int8、4→int4），与 `--format` 冲突时报错，使用时给出 DeprecationWarning；
-- `--group` 只支持 128；`--chunk`（默认 8192 行）按行分块上卡量化，显存占用可控；
-- int8 计算 rel-L2 并在超过 `--qa-threshold`（默认 0.02）时返回非零退出码；int4 在 rel-L2 > 0.12 时输出警告；
+- `--group` 只支持 128；`--chunk`（默认 8192 行）按行分块上卡量化，显存占用可控；分片 checkpoint 会自动定位包含表键的分片；
+- int8 与 int4 都计算 rel-L2：超过 `--qa-threshold`（默认 int8 0.02、int4 0.12）时返回非零退出码且不写 sidecar；
 - 量化在 GPU 上分块执行，产物写回 CPU/磁盘；与在线量化共用 `embed_quant.py` 中的同一套函数，结果逐位一致。
 
 ---
@@ -174,8 +175,8 @@ Qwen3-Embedding-4B-AWQ（表 bf16 740.5 MiB；int8 表约 370 MiB + bf16 scale�
 | 条件 | 行为 |
 |---|---|
 | 非 tied / `off` / 环境开关 | 旧路径（tied 时仍是两份表） |
-| sidecar 存在 | 使用 sidecar；格式冲突仅告警 |
-| `SM < 80` / `TP > 1` / 引擎 dtype 非 fp16,bf16 / `hidden % 16 != 0`（量化 + `% 128 != 0`） | `auto` 回退并记录原因；`on`/显式量化报错 |
+| sidecar 存在且满足约束 | 使用 sidecar；格式冲突仅告警 |
+| `SM < 80` / `TP > 1` / 引擎 dtype 非 fp16,bf16 / `hidden % 16 != 0`（sidecar 或量化格式 + `% 128 != 0`） | `auto` 回退并记录原因；`on`/显式在线量化报错 |
 | 表为 fp32 等非 16 位浮点 | 回退 C++ 引擎 dtype 转换并记录日志 |
 | PyTorch 引擎 | 不涉及，行为不变 |
 
@@ -185,11 +186,11 @@ Qwen3-Embedding-4B-AWQ（表 bf16 740.5 MiB；int8 表约 370 MiB + bf16 scale�
 
 ## 9. 验证结果（实测）
 
-- 性能（Qwen3.5-4B-AWQ，8 并发）：**466 tok/s**（旧 SIMT 打包头 321）；单流约 70 tok/s；长 prompt TTFT 0.64–0.79 s；int8 sidecar 路径回归与基线一致。
+- 性能（Qwen3.5-4B-AWQ，8 并发）：**466 tok/s**（旧双表 GEMM 头 321）；单流约 70 tok/s；长 prompt TTFT 0.64–0.79 s；int8 sidecar 路径回归与基线一致。
 - native（无 sidecar）路径：8 并发约 370 tok/s、单流约 54 tok/s（表更大，带宽更高）。
 - 质量：int8 teacher-forced top-1 **98.96%**；int4 QA rel-L2 9.27%（top-1 90.8%）；bf16 贪心输出与 CPU 一致；bf16→fp16 转换为位级精确（GPU 单测 `torch.equal` 验证）。
 - 显存：见 §6.2；Embedding 向量 L2 范数 ≈ 1.0。
-- 单测：`python -m pytest tests/turbomind/embedding/ -q`，199 passed（含决策矩阵、meta 归一化、脚本 CLI、GPU 混合精度对拍、CPU staging/峰值相关断言）。
+- 单测：`python -m pytest tests/turbomind/embedding/ -q` 全部通过（含决策矩阵、meta 归一化、脚本 CLI、GPU 混合精度对拍、CPU staging/峰值相关断言）。
 
 ---
 

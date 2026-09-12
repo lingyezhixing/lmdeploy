@@ -766,6 +766,8 @@ PYBIND11_MODULE(_turbomind, m)
            int                     group,
            std::uintptr_t          stream_ptr) {
             TM_CHECK(out && token_ids && table && scales);
+            TM_CHECK(token_ids->dtype() == ft::kInt32)
+                << "token_ids must be int32; got " << token_ids->dtype();
             const ft::Buffer_<int> ids{(int*)token_ids->raw_data(), token_ids->size(), token_ids->device()};
             ft::invokeEmbeddingLookupInt8(ft::Ref<Tensor>{*out},
                                           ids,
@@ -791,6 +793,8 @@ PYBIND11_MODULE(_turbomind, m)
            int                     group,
            std::uintptr_t          stream_ptr) {
             TM_CHECK(out && token_ids && table && scales && zeros);
+            TM_CHECK(token_ids->dtype() == ft::kInt32)
+                << "token_ids must be int32; got " << token_ids->dtype();
             const ft::Buffer_<int> ids{(int*)token_ids->raw_data(), token_ids->size(), token_ids->device()};
             ft::invokeEmbeddingLookupInt4(ft::Ref<Tensor>{*out},
                                           ids,
@@ -815,6 +819,8 @@ PYBIND11_MODULE(_turbomind, m)
            std::shared_ptr<Tensor> table,
            std::uintptr_t          stream_ptr) {
             TM_CHECK(out && token_ids && table);
+            TM_CHECK(token_ids->dtype() == ft::kInt32)
+                << "token_ids must be int32; got " << token_ids->dtype();
             const ft::Buffer_<int> ids{(int*)token_ids->raw_data(), token_ids->size(), token_ids->device()};
             ft::invokeEmbeddingLookup(ft::Ref<Tensor>{*out},
                                       ids,

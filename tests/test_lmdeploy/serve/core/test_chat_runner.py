@@ -133,6 +133,41 @@ def _tools():
     }]
 
 
+def test_runner_applies_server_enable_thinking_default_before_building_parser():
+    seen = {}
+
+    class _RecordingParser(_Parser):
+
+        def __init__(self, request):
+            super().__init__(request)
+            seen['enable_thinking'] = (request.chat_template_kwargs or {}).get('enable_thinking')
+
+    context = _FakeServerContext(_RecordingParser)
+    context.enable_thinking = False
+
+    asyncio.run(ChatRunner.prepare(context, _request()))
+
+    assert seen['enable_thinking'] is False
+    assert context.async_engine.preprocess_kwargs['chat_template_kwargs'] == {'enable_thinking': False}
+
+
+def test_runner_keeps_request_enable_thinking_over_server_default():
+    seen = {}
+
+    class _RecordingParser(_Parser):
+
+        def __init__(self, request):
+            super().__init__(request)
+            seen['enable_thinking'] = (request.chat_template_kwargs or {}).get('enable_thinking')
+
+    context = _FakeServerContext(_RecordingParser)
+    context.enable_thinking = False
+
+    asyncio.run(ChatRunner.prepare(context, _request(enable_thinking=True)))
+
+    assert seen['enable_thinking'] is True
+
+
 def test_runner_forwards_parser_adjusted_response_format_to_engine():
     response_format = {'type': 'json_object'}
 

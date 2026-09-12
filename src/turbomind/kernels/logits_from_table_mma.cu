@@ -25,8 +25,8 @@ namespace turbomind {
 // The epilogue scatters the accumulator fragments through a smem tile, then
 // writes rows of 128 consecutive vocab entries with consecutive threads.
 // Decode (tokens <= 16) uses the N_TILE=16 instance (K_STAGE=32 for 16-bit
-// tables, K_STAGE=64 for int8/int4 so each raw row copy is a full 64 B);
-// prefill uses N_TILE=64 with K_STAGE=32 for every format.
+// tables, K_STAGE=64 for int8/int4 so one stage spans half of a 128-element
+// dequant group); prefill uses N_TILE=64 with K_STAGE=32 for every format.
 
 namespace {
 
@@ -397,6 +397,17 @@ __global__ void logitsFromTableMmaKernel(void* __restrict__ logits_,
         if (t0 + n < tokens && m0 + m < vocab) {
             logits[(size_t)(t0 + n) * vocab + m0 + m] = Es[n * E_STRIDE + m];
         }
+    }
+#else
+    // This instantiation was compiled for a pre-SM80 target. The host runtime
+    // SM check cannot catch it: the same-major cubin or PTX JIT path can still
+    // select this kernel on a newer device. Fill the output with NaN bytes so
+    // the mistake is loud instead of leaving uninitialized logits behind.
+    auto* raw = reinterpret_cast<unsigned char*>(logits_);
+    const size_t bytes = (size_t)tokens * (size_t)vocab * sizeof(T);
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < bytes;
+         i += (size_t)gridDim.x * blockDim.x) {
+        raw[i] = 0xFF;
     }
 #endif  // __CUDA_ARCH__ >= 800
 }

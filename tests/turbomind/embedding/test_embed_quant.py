@@ -1,4 +1,3 @@
-# tests/turbomind/embedding/test_embed_quant.py
 import json
 
 import pytest
@@ -7,9 +6,11 @@ import torch
 from lmdeploy.turbomind.embed_quant import (
     SIDECAR_META_NAME,
     SIDECAR_NAME,
+    dequant_int4_simple,
     dequant_int8,
     find_embed_key,
     load_sidecar_tensors,
+    quantize_int4_simple,
     quantize_int8_sym,
     read_sidecar_meta,
     sidecar_enabled,
@@ -29,12 +30,18 @@ def test_int8_roundtrip_quality():
 
 
 def test_find_embed_key(tmp_path):
-    cfg = {'architectures': ['Qwen3_5ForCausalLM']}
-    (tmp_path / 'config.json').write_text(json.dumps(cfg))
     from safetensors.torch import save_file
     save_file({'model.language_model.embed_tokens.weight': torch.zeros(4, 8)},
               str(tmp_path / 'model.safetensors'))
     assert find_embed_key(str(tmp_path)) == 'model.language_model.embed_tokens.weight'
+
+
+def test_find_embed_key_missing_raises(tmp_path):
+    from safetensors.torch import save_file
+    save_file({'model.other.weight': torch.zeros(4, 8)},
+              str(tmp_path / 'model.safetensors'))
+    with pytest.raises(RuntimeError, match='no known embedding key'):
+        find_embed_key(str(tmp_path))
 
 
 def test_sidecar_v2_write_and_env(tmp_path, monkeypatch):
@@ -65,7 +72,6 @@ def test_sidecar_v1_rejected(tmp_path):
 
 
 def test_int4_simple_roundtrip():
-    from lmdeploy.turbomind.embed_quant import dequant_int4_simple, quantize_int4_simple
     torch.manual_seed(0)
     x = torch.randn(96, 256, dtype=torch.bfloat16)
     q, s, z = quantize_int4_simple(x, 128)
@@ -76,8 +82,15 @@ def test_int4_simple_roundtrip():
     assert rel < 0.12
 
 
+@pytest.mark.parametrize('value', [3.0, -2.5, 0.0])
+def test_int4_simple_constant_group_roundtrip(value):
+    x = torch.full((2, 256), value, dtype=torch.bfloat16)
+    q, s, z = quantize_int4_simple(x, 128)
+    dq = dequant_int4_simple(q, s, z, 128, 256)
+    torch.testing.assert_close(dq, x.float(), atol=1e-2, rtol=0)
+
+
 def test_load_sidecar_tensors_absent(tmp_path):
-    from lmdeploy.turbomind.embed_quant import load_sidecar_tensors
     assert load_sidecar_tensors(str(tmp_path)) == {}
 
 

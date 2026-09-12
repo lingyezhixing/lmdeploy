@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any, Literal
 
 import torch
+import torch.nn.functional as F
 
 from lmdeploy._guided_decoding import ensure_response_format_compilable
 from lmdeploy.archs import get_model_arch
@@ -46,6 +47,8 @@ QWEN3_RERANK_PREFIX = ('<|im_start|>system\n'
                         'and the Instruct provided. Note that the answer can only be "yes" or '
                         '"no".<|im_end|>\n<|im_start|>user\n')
 QWEN3_RERANK_SUFFIX = '<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n'
+DEFAULT_RERANK_INSTRUCTION = ('Given a web search query, retrieve relevant '
+                              'passages that answer the query')
 
 
 @dataclasses.dataclass
@@ -975,6 +978,18 @@ class AsyncEngine:
         # normalize the summed NLL by the number of scored tokens
         return ce_loss / num_scored
 
+    async def _run_auxiliary_tasks(self, sessions: list[Session], tasks: list[asyncio.Task]) -> None:
+        """Await auxiliary request tasks and always release their sessions."""
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for session in sessions:
+                self.session_mgr.remove(session)
+
     async def async_get_embeddings(self, input_ids: list[list[int]]) -> list[torch.Tensor]:
         """Get embedding vectors with last-token pooling and L2 normalization.
 
@@ -1014,9 +1029,7 @@ class AsyncEngine:
                                          session=session,
                                          input_ids=input_ids[i],
                                          gen_config=gen_config,
-                                         stream_output=False,
-                                         sequence_start=True,
-                                         sequence_end=True) as gen:
+                                         stream_output=False) as gen:
                     async for outputs in gen:
                         pass
                     last_hidden = outputs.last_hidden_state[0]
@@ -1024,17 +1037,14 @@ class AsyncEngine:
                     embeddings[i] = (last_hidden / norm).cpu()
 
         sessions = [self.session_mgr.get() for _ in range(len(input_ids))]
-        tasks = [_proc(session, i) for i, session in enumerate(sessions)]
-        await asyncio.gather(*tasks)
-        for session in sessions:
-            self.session_mgr.remove(session)
+        tasks = [asyncio.create_task(_proc(session, i)) for i, session in enumerate(sessions)]
+        await self._run_auxiliary_tasks(sessions, tasks)
 
         return embeddings
 
     @staticmethod
     def format_rerank_input(query: str, document: str,
-                            instruction: str = 'Given a web search query, retrieve '
-                            'relevant passages that answer the query') -> str:
+                            instruction: str = DEFAULT_RERANK_INSTRUCTION) -> str:
         """Format a query-document pair using the Qwen3-Reranker template.
 
         Args:
@@ -1054,15 +1064,16 @@ class AsyncEngine:
             self,
             query: str,
             documents: list[str],
-            instruction: str = 'Given a web search query, retrieve relevant '
-            'passages that answer the query') -> tuple[list[tuple[float, int]],
-                                                       int]:
+            instruction: str = DEFAULT_RERANK_INSTRUCTION,
+    ) -> tuple[list[tuple[float, int]], int]:
         """Get rerank relevance scores for query-document pairs.
 
-        Uses the Qwen3-Reranker approach: format each pair through the chat
-        template, run a forward pass, extract logits at the last token position
-        for the "yes" and "no" tokens, then compute:
+        Uses the Qwen3-Reranker approach: format each pair with the fixed
+        Qwen3-Reranker prompt template, run a forward pass, extract logits at
+        the last token position for the "yes" and "no" tokens, then compute:
             score = softmax([logit_no, logit_yes])[1]
+
+        Only Qwen3-Reranker style checkpoints are supported.
 
         Args:
             query: The search query string.
@@ -1075,7 +1086,6 @@ class AsyncEngine:
         """
         if self.backend != 'turbomind':
             raise ValueError('async_get_rerank_scores requires the turbomind backend.')
-        import torch.nn.functional as F
 
         token_true_id = self.tokenizer.encode('yes', add_bos=False,
                                                add_special_tokens=False)[0]
@@ -1084,12 +1094,10 @@ class AsyncEngine:
 
         # Format and tokenize each query-document pair
         all_input_ids = []
-        prompt_tokens = 0
         for doc in documents:
             formatted = self.format_rerank_input(query, doc, instruction)
             ids = self.tokenizer.encode(formatted, add_bos=False,
                                         add_special_tokens=False)
-            prompt_tokens += len(ids)
             all_input_ids.append(ids)
 
         # Reserve one token for the generation step: an input exactly at
@@ -1114,17 +1122,14 @@ class AsyncEngine:
 
         async def _proc(session, i):
             async with session.request_handle() as handle:
-                max_new_tokens = 1 if self.backend == 'turbomind' else 0
-                gen_config = GenerationConfig(max_new_tokens=max_new_tokens,
+                gen_config = GenerationConfig(max_new_tokens=1,
                                               output_logits='generation',
                                               top_k=1)
                 async with self.safe_run(handle,
                                          session=session,
                                          input_ids=all_input_ids[i],
                                          gen_config=gen_config,
-                                         stream_output=False,
-                                         sequence_start=True,
-                                         sequence_end=True) as gen:
+                                         stream_output=False) as gen:
                     async for outputs in gen:
                         pass
                     last_logits = outputs.logits[0]
@@ -1134,12 +1139,8 @@ class AsyncEngine:
                         dim=0)[1].item()
 
         sessions = [self.session_mgr.get() for _ in range(len(all_input_ids))]
-        await asyncio.gather(*[_proc(s, i) for i, s in enumerate(sessions)])
-        if self.backend == 'pytorch':
-            for s in sessions:
-                await s.async_close()
-        for s in sessions:
-            self.session_mgr.remove(s)
+        tasks = [asyncio.create_task(_proc(s, i)) for i, s in enumerate(sessions)]
+        await self._run_auxiliary_tasks(sessions, tasks)
 
         results = sorted(((s, i) for i, s in enumerate(scores)),
                          key=lambda x: x[0], reverse=True)

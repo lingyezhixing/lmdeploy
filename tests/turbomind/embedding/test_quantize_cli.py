@@ -1,4 +1,3 @@
-# tests/turbomind/embedding/test_quantize_cli.py
 import json
 import os
 import sys
@@ -12,12 +11,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'sc
 from quantize_embedding import main  # noqa: E402
 
 
-def _make_model(tmp_path, vocab=64, hidden=256, tied=True, arch='Qwen3_5ForCausalLM'):
+def _make_model(tmp_path, vocab=64, hidden=256, tied=True, arch='Qwen3_5ForConditionalGeneration'):
     (tmp_path / 'config.json').write_text(json.dumps(
         {'architectures': [arch], 'tie_word_embeddings': tied}))
     torch.manual_seed(0)
     save_file({'model.language_model.embed_tokens.weight':
-               torch.randn(vocab, hidden, dtype=torch.bfloat16).to(torch.bfloat16)},
+               torch.randn(vocab, hidden, dtype=torch.bfloat16)},
               str(tmp_path / 'model.safetensors'))
 
 
@@ -101,3 +100,29 @@ def test_cli_bits16_untied_rejected(tmp_path):
     _make_model(tmp_path, tied=False)
     with pytest.raises(SystemExit, match='requires tied embeddings'):
         main(['--model', str(tmp_path), '--bits', '16'])
+
+
+def test_cli_supports_sharded_checkpoint(tmp_path):
+    vocab, hidden = 64, 256
+    (tmp_path / 'config.json').write_text(json.dumps(
+        {'architectures': ['Qwen3_5ForConditionalGeneration'],
+         'tie_word_embeddings': True}))
+    torch.manual_seed(0)
+    save_file({'model.language_model.layers.0.weight': torch.zeros(2, 2)},
+              str(tmp_path / 'model-00001-of-00002.safetensors'))
+    save_file({'model.language_model.embed_tokens.weight':
+               torch.randn(vocab, hidden, dtype=torch.bfloat16)},
+              str(tmp_path / 'model-00002-of-00002.safetensors'))
+    rc = main(['--model', str(tmp_path), '--format', 'int8', '--chunk', '16'])
+    assert rc == 0
+    with safe_open(str(tmp_path / 'embed_quant.safetensors'), 'pt') as f:
+        assert 'model.language_model.embed_tokens.weight_i8' in set(f.keys())
+
+
+def test_cli_int4_qa_threshold_failure_skips_sidecar(tmp_path):
+    _make_model(tmp_path)
+    rc = main(['--model', str(tmp_path), '--bits', '4', '--chunk', '16',
+               '--qa-threshold', '1e-9'])
+    assert rc == 1
+    assert not (tmp_path / 'embed_quant.safetensors').exists()
+    assert not (tmp_path / 'embed_quant.json').exists()

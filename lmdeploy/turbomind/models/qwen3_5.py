@@ -82,6 +82,17 @@ def map_packed_qwen35_experts(name: str) -> str:
     return re.sub(
         r'(mlp\.experts\.(?:gate_up|down)_proj)$', r'\1.weight', name)
 
+def _text_key_prefix(pfx) -> str:
+    """Checkpoint prefix that holds the text model weights.
+
+    Qwen3.5 VLM checkpoints nest the text tower under
+    ``model.language_model``; text-only checkpoints use ``model`` directly.
+    """
+    if pfx.has('model.language_model.embed_tokens.weight'):
+        return 'model.language_model'
+    return 'model'
+
+
 class Qwen3_5TextModel(TextModel):
     """Weight model for Qwen3.5 (dense + linear-attn + optional MoE)."""
 
@@ -131,6 +142,7 @@ class Qwen3_5TextModel(TextModel):
     # ------------------------------------------------------------------
 
     def model(self, pfx):
+        base = _text_key_prefix(pfx)
         root_cfg = make_model_weight_config(self.cfg)
         builder = TextModelBuilder(
             root_cfg, self._ctx,
@@ -138,13 +150,13 @@ class Qwen3_5TextModel(TextModel):
             tp=self._model_tp,
             vocab_size=self.cfg.vocab_size)
         add_embedding_and_head(
-            self, builder, pfx, 'model.language_model.embed_tokens.weight',
+            self, builder, pfx, f'{base}.embed_tokens.weight',
             tie=self.cfg.tie_word_embeddings)
         builder.norm = self.norm(
-            pfx + 'model.language_model.norm',
+            pfx + f'{base}.norm',
             zero_centered=True,
         )
-        builder.layers = self.layers(pfx + 'model.language_model.layers')
+        builder.layers = self.layers(pfx + f'{base}.layers')
         builder.build()
 
     # ------------------------------------------------------------------

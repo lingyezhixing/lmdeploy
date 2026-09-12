@@ -338,6 +338,10 @@ def serve(model_path: str,
         allow_terminate_by_client (bool): Allow request from client to terminate server.
         allowed_media_domains (list[str] | None): Optional exact hostname
             allowlist for HTTP(S) media URLs.
+        task (str): Serving task. One of `llm` (chat/completions), `embed`
+            (/v1/embeddings) or `rerank` (/v1/rerank). Default to `llm`.
+        enable_thinking (bool | None): Server-level default for
+            `enable_thinking`. Request-level settings always override it.
     """
     if os.getenv('TM_LOG_LEVEL') is None:
         os.environ['TM_LOG_LEVEL'] = log_level

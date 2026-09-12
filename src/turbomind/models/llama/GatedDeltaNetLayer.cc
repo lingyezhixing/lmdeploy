@@ -373,6 +373,7 @@ void GatedDeltaNetLayer::Forward(ForwardParam param)
 
     Tensor all_proj;
     TM_SCOPE_CALL(linear_.Forward(param.input, *weights.in_proj_all, all_proj));
+    TM_CHECK_NOTNULL(weights.in_proj_ba);
     Tensor ba_proj;
     TM_SCOPE_CALL(linear_.Forward(param.input, *weights.in_proj_ba, ba_proj));
 

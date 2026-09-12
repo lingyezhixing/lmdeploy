@@ -1,4 +1,3 @@
-# tests/turbomind/embedding/test_chat_cli_embed_head.py
 """`lmdeploy chat` must forward --embed-head / --embed-head-format to TurboMind."""
 import pytest
 

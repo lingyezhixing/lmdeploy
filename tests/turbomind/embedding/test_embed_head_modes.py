@@ -1,4 +1,3 @@
-# tests/turbomind/embedding/test_embed_head_modes.py
 import pytest
 import torch
 
@@ -42,6 +41,11 @@ def R(**kw):
     (dict(fmt='q8'), 'error', None, 'invalid'),                     # invalid format
     (dict(mode='bogus'), 'error', None, 'invalid'),                 # invalid mode
     (dict(mode='off', fmt='int8'), 'native', None, '--embed-head off'),  # off beats explicit quant
+    (dict(sidecar_format='int8', sm_version=70), 'native', None, 'SM70'),  # sidecar follows auto fallback
+    (dict(sidecar_format='int4', tp_size=2), 'native', None, 'tp=2'),
+    (dict(sidecar_format='int8', hidden=1040), 'native', None, '% 128 != 0'),
+    (dict(sidecar_format='int8', sm_version=70, mode='on'), 'error', None, 'SM70'),
+    (dict(sidecar_format='q8'), 'error', None, 'invalid'),               # invalid sidecar format
 ])
 def test_decision_matrix(kwargs, action, fmt, constraint):
     plan = R(**kwargs)

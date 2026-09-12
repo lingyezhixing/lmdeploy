@@ -25,8 +25,8 @@ class TextModel(ABC):
         Prefix argument and use Prefix arithmetic for tensor reads.
       - The base class provides no factory stubs; every subclass
         implements its own model(pfx) that calls
-        builder.add_token_embeds / builder.add_lm_head on a
-        TextModelBuilder for the root-level commits.
+        ``add_embedding_and_head`` on a TextModelBuilder for the
+        root-level commits (embedding table + output head).
     """
 
     _loader_mappings: list = []
