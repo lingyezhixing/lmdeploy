@@ -292,6 +292,15 @@ class TurbomindEngineConfig:
             blocked fp8 checkpoints, and `mxfp4` means MXFP4 expert
             weights. If it is not specified, i.e. None, it will be
             extracted from the input model
+        embed_head: whether tied models share one embedding table. It can
+            be one of the following values [auto, on, off]. `auto` shares
+            when usable and falls back to the legacy two-copy path
+            otherwise, `on` requires sharing, and `off` keeps the legacy
+            path.
+        embed_head_format: storage format of the shared table when no
+            offline sidecar exists. It can be one of the following values
+            [native, int8, int4]. `native` keeps the checkpoint table
+            dtype; int8/int4 quantize online with group 128.
         tp: the number of GPU cards used in tensor parallelism,
             default to 1
         session_len: the max session length of a sequence, default to
@@ -374,6 +383,8 @@ class TurbomindEngineConfig:
 
     dtype: str = 'auto'
     model_format: str | None = None
+    embed_head: str = 'auto'
+    embed_head_format: str = 'native'
     tp: int = 1
     dp: int = 1
     cp: int = 1

@@ -387,6 +387,11 @@ class Builder:
         for name, (tensor, split_side) in self._pending_tensors.items():
             self._commit_tensor(name, tensor, split_side)
 
+        # Release the staging dicts so the drained source tensors (e.g. the
+        # fp16/bf16 embed table) do not stay alive next to the C++ copies.
+        self._pending_children.clear()
+        self._pending_tensors.clear()
+
         return BuiltModule(self._handles)
 
     def _create_handles(self):

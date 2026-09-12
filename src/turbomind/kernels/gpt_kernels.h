@@ -243,4 +243,27 @@ void invokeEmbeddingLookup(Ref<Tensor>         out_,
                            const Tensor&       embedding_table,
                            cudaStream_t        st);
 
+void invokeEmbeddingLookupInt8(Ref<Tensor>         out,
+                               const Buffer_<int>& token_ids,
+                               const Tensor&       table,
+                               const Tensor&       scales,
+                               int                 group,
+                               cudaStream_t        st);
+
+void invokeEmbeddingLookupInt4(Ref<Tensor>         out,
+                               const Buffer_<int>& token_ids,
+                               const Tensor&       table,
+                               const Tensor&       scales,
+                               const Tensor&       zeros,
+                               int                 group,
+                               cudaStream_t        st);
+
+void invokeLogitsFromTable(Ref<Tensor>   logits,
+                           const Tensor& x,
+                           const Tensor& table,
+                           const Tensor& scale,
+                           const Tensor& zero,
+                           int           group,
+                           cudaStream_t  st);
+
 }  // namespace turbomind

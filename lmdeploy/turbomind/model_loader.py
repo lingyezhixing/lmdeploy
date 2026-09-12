@@ -53,7 +53,8 @@ class ModelLoader:
     def export(self):
         ckpt = create_checkpoint(
             self.model_path,
-            mappings=getattr(self.model, '_loader_mappings', []))
+            mappings=getattr(self.model, '_loader_mappings', []),
+            embed_head=self.engine_config.embed_head)
         try:
             self.model.model(Prefix(ckpt))
         finally:
@@ -63,7 +64,8 @@ class ModelLoader:
     def export_iter(self):
         ckpt = create_checkpoint(
             self.model_path,
-            mappings=getattr(self.model, '_loader_mappings', []))
+            mappings=getattr(self.model, '_loader_mappings', []),
+            embed_head=self.engine_config.embed_head)
         try:
             self.model.model(Prefix(ckpt))
             yield -1

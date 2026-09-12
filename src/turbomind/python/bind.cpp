@@ -25,6 +25,7 @@
 #include "src/turbomind/engine/model_request.h"
 #include "src/turbomind/engine/multimodal_input.h"
 #include "src/turbomind/kernels/copy/copy.h"
+#include "src/turbomind/kernels/gpt_kernels.h"
 #include "src/turbomind/kernels/norm/norm.h"
 #include "src/turbomind/models/attention_weight.h"
 #include "src/turbomind/models/decoder_layer_weight.h"
@@ -755,6 +756,101 @@ PYBIND11_MODULE(_turbomind, m)
         "src"_a,
         "dst"_a,
         "stream_ptr"_a);
+
+    m.def(
+        "embedding_lookup_int8",
+        [](std::shared_ptr<Tensor> out,
+           std::shared_ptr<Tensor> token_ids,
+           std::shared_ptr<Tensor> table,
+           std::shared_ptr<Tensor> scales,
+           int                     group,
+           std::uintptr_t          stream_ptr) {
+            TM_CHECK(out && token_ids && table && scales);
+            const ft::Buffer_<int> ids{(int*)token_ids->raw_data(), token_ids->size(), token_ids->device()};
+            ft::invokeEmbeddingLookupInt8(ft::Ref<Tensor>{*out},
+                                          ids,
+                                          *table,
+                                          *scales,
+                                          group,
+                                          reinterpret_cast<cudaStream_t>(stream_ptr));
+        },
+        "out"_a,
+        "token_ids"_a,
+        "table"_a,
+        "scales"_a,
+        "group"_a,
+        "stream_ptr"_a = std::uintptr_t{0});
+
+    m.def(
+        "embedding_lookup_int4",
+        [](std::shared_ptr<Tensor> out,
+           std::shared_ptr<Tensor> token_ids,
+           std::shared_ptr<Tensor> table,
+           std::shared_ptr<Tensor> scales,
+           std::shared_ptr<Tensor> zeros,
+           int                     group,
+           std::uintptr_t          stream_ptr) {
+            TM_CHECK(out && token_ids && table && scales && zeros);
+            const ft::Buffer_<int> ids{(int*)token_ids->raw_data(), token_ids->size(), token_ids->device()};
+            ft::invokeEmbeddingLookupInt4(ft::Ref<Tensor>{*out},
+                                          ids,
+                                          *table,
+                                          *scales,
+                                          *zeros,
+                                          group,
+                                          reinterpret_cast<cudaStream_t>(stream_ptr));
+        },
+        "out"_a,
+        "token_ids"_a,
+        "table"_a,
+        "scales"_a,
+        "zeros"_a,
+        "group"_a,
+        "stream_ptr"_a = std::uintptr_t{0});
+
+    m.def(
+        "embedding_lookup",
+        [](std::shared_ptr<Tensor> out,
+           std::shared_ptr<Tensor> token_ids,
+           std::shared_ptr<Tensor> table,
+           std::uintptr_t          stream_ptr) {
+            TM_CHECK(out && token_ids && table);
+            const ft::Buffer_<int> ids{(int*)token_ids->raw_data(), token_ids->size(), token_ids->device()};
+            ft::invokeEmbeddingLookup(ft::Ref<Tensor>{*out},
+                                      ids,
+                                      *table,
+                                      reinterpret_cast<cudaStream_t>(stream_ptr));
+        },
+        "out"_a,
+        "token_ids"_a,
+        "table"_a,
+        "stream_ptr"_a = std::uintptr_t{0});
+
+    m.def(
+        "logits_from_table",
+        [](std::shared_ptr<Tensor> logits,
+           std::shared_ptr<Tensor> x,
+           std::shared_ptr<Tensor> table,
+           std::shared_ptr<Tensor> scale,
+           std::shared_ptr<Tensor> zero,
+           int                     group,
+           std::uintptr_t          stream_ptr) {
+            TM_CHECK(logits && x && table && scale);
+            ft::invokeLogitsFromTable(ft::Ref<Tensor>{*logits},
+                                      *x,
+                                      *table,
+                                      *scale,
+                                      zero ? *zero : ft::Tensor{},
+                                      group,
+                                      reinterpret_cast<cudaStream_t>(stream_ptr));
+        },
+        "logits"_a,
+        "x"_a,
+        "table"_a,
+        "scale"_a,
+        "zero"_a,
+        "group"_a,
+        "stream_ptr"_a = std::uintptr_t{0});
 
     py::bind_map<TensorMap, std::shared_ptr<TensorMap>>(m, "TensorMap");
 

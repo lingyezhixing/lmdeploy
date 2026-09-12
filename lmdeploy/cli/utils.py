@@ -149,6 +149,22 @@ class ArgumentHelper:
                                    'checkpoints, and `mxfp4` refers to MXFP4 expert weights.')
 
     @staticmethod
+    def embed_head(parser):
+        return parser.add_argument('--embed-head', type=str, default='auto',
+                                   choices=['auto', 'on', 'off'],
+                                   help='Share the embedding table for tied models '
+                                        '(auto/on/off). Default: auto')
+
+    @staticmethod
+    def embed_head_format(parser):
+        return parser.add_argument('--embed-head-format', type=str, default='native',
+                                   choices=['native', 'int8', 'int4'],
+                                   help='Format of the shared embedding table when no '
+                                        'sidecar exists: native keeps the checkpoint '
+                                        'table dtype; int8/int4 quantize online. '
+                                        'Default: native')
+
+    @staticmethod
     def revision(parser, default: str = None):
         return parser.add_argument('--revision',
                                    type=str,

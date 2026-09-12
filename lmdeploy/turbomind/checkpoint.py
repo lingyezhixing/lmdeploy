@@ -71,6 +71,11 @@ class Prefix:
         """
         return self.ckpt.get(self._joined(name, sep), index=index)
 
+    def get_cpu(self, name: str = '', sep: str = '.', *, index=None) -> torch.Tensor:
+        """Read the CPU-resident tensor at ``self.prefix + sep + name``
+        without transferring it to the GPU."""
+        return self.ckpt.get_cpu(self._joined(name, sep), index=index)
+
     def has(self, name: str = '', sep: str = '.') -> bool:
         return self.ckpt.has(self._joined(name, sep))
 
@@ -152,6 +157,11 @@ class Checkpoint(ABC):
         (``tensor[index]``) before being returned.
         """
 
+    def get_cpu(self, key: str, index=None) -> torch.Tensor:
+        """Return the CPU-resident tensor at ``key`` without a device
+        transfer. Raises ``KeyError`` on miss."""
+        raise NotImplementedError
+
     @abstractmethod
     def has(self, key: str) -> bool:
         """Return whether ``key`` exists in this checkpoint."""
@@ -173,6 +183,18 @@ class Checkpoint(ABC):
 
         Default no-op; idempotent.
         """
+
+    def load_sidecar(self, model_dir: str, *, embed_head: str = 'auto') -> int:
+        """Merge sidecar quantized tensors; returns the number of keys loaded."""
+        from .embed_quant import load_sidecar_tensors, read_sidecar_meta, sidecar_enabled
+        if embed_head == 'off' or not sidecar_enabled(model_dir):
+            return 0
+        read_sidecar_meta(model_dir)   # version gate: raises on v1
+        tensors = load_sidecar_tensors(model_dir)
+        mappings = getattr(self, '_mappings', ())
+        for k, t in tensors.items():
+            self._data[_apply_mappings(k, mappings)] = t
+        return len(tensors)
 
 
 class SafetensorsCheckpoint(Checkpoint):
@@ -212,6 +234,12 @@ class SafetensorsCheckpoint(Checkpoint):
             t = t[index]
         return t.cuda()
 
+    def get_cpu(self, key: str, index=None):
+        t = self._data[key]
+        if index is not None:
+            t = t[index]
+        return t
+
     def pop(self, key: str, index=None):
         t = self._data.pop(key)
         if index is not None:
@@ -244,6 +272,12 @@ class PytorchCheckpoint(Checkpoint):
             t = t[index]
         return t.cuda()
 
+    def get_cpu(self, key: str, index=None):
+        t = self._data[key]
+        if index is not None:
+            t = t[index]
+        return t
+
     def pop(self, key: str, index=None):
         t = self._data.pop(key)
         if index is not None:
@@ -255,7 +289,14 @@ class PytorchCheckpoint(Checkpoint):
     def close(self) -> None: self._data = {}
 
 
-def create_checkpoint(model_path: str, *, mappings=()) -> Checkpoint:
+def create_checkpoint(model_path: str, *, mappings=(), embed_head: str = 'auto') -> Checkpoint:
+    """Open the checkpoint at ``model_path`` and merge the embed sidecar, if any."""
+    ckpt = _open_checkpoint(model_path, mappings=mappings)
+    ckpt.load_sidecar(model_path, embed_head=embed_head)
+    return ckpt
+
+
+def _open_checkpoint(model_path: str, *, mappings=()) -> Checkpoint:
     """Pick the right :class:`Checkpoint` subclass for ``model_path``.
 
     Precedence matches the legacy ``create_loader``:

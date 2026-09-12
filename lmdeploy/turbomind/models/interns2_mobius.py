@@ -35,7 +35,7 @@ from .qwen3_5 import (
     Qwen3_5TextModel,
     Qwen3_5VisionModel,
 )
-from .utils import make_model_weight_config
+from .utils import add_embedding_and_head, make_model_weight_config
 
 
 def map_mobius_meta_moe_names(name: str) -> str:
@@ -156,15 +156,13 @@ class InternS2MobiusTextModel(Qwen3_5TextModel):
             root_handles=self._root_handles,
             tp=self._model_tp,
             vocab_size=self.cfg.vocab_size)
-        builder.add_token_embeds(pfx.get('model.language_model.embed_tokens.weight'))
+        add_embedding_and_head(
+            self, builder, pfx, 'model.language_model.embed_tokens.weight',
+            tie=self.cfg.tie_word_embeddings)
         builder.norm = self.norm(
             pfx + 'model.language_model.norm',
             zero_centered=True,
         )
-        lm_pfx = (pfx + 'model.language_model.embed_tokens'
-                  if self.cfg.tie_word_embeddings
-                  else pfx + 'lm_head')
-        builder.add_lm_head(self._linear(lm_pfx))
         builder.meta_experts = build_meta_experts(self)
         builder.layers = self.layers(pfx + 'model.language_model.layers')
         builder.build()

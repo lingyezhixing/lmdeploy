@@ -456,11 +456,15 @@ class WeightFormatResolver:
     """
 
     def __init__(self, *, data_type: _tm.DataType,
-                 formats: list[WeightFormat]):
+                 formats: list[WeightFormat],
+                 embed_head: str = 'auto',
+                 embed_head_format: str = 'native'):
         self._data_type = data_type
         self._formats   = formats
         self._suffixes  = frozenset(
             s for f in formats for s in f.suffix_map)
+        self.embed_head = embed_head
+        self.embed_head_format = embed_head_format
 
     @property
     def data_type(self) -> _tm.DataType:

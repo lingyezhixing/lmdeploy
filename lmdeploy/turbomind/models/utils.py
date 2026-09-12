@@ -3,15 +3,29 @@
 from __future__ import annotations
 
 import math
+import os
 from types import SimpleNamespace
 
 import _turbomind as _tm
 import torch
 
 from lmdeploy.archs import get_model_arch
+from lmdeploy.utils import get_logger
 
 from ..builders import _act_type_id
+from ..embed_quant import (
+    EMBED_I4_SCALE_SUFFIX,
+    EMBED_I4_SUFFIX,
+    EMBED_I4_ZERO_SUFFIX,
+    EMBED_I8_SCALE_SUFFIX,
+    EMBED_I8_SUFFIX,
+    SHARED_HEAD_KEY,
+    quantize_table,
+    resolve_embed_head,
+)
 from ..linear import Linear, _dequant_linear
+
+logger = get_logger('lmdeploy')
 
 
 def source_model_config(model_config):
@@ -372,6 +386,127 @@ def reorder_rotary_emb(x, head_dim: int, rope_dim: int, *, resolver=None):
 
     return _reorder_rotary_emb(x, head_dim, rope_dim)
 
+
+
+def _sm_version() -> int:
+    """Current device SM version (e.g. 89), or 0 when unavailable."""
+    try:
+        if not torch.cuda.is_available():
+            return 0
+        major, minor = torch.cuda.get_device_capability()
+        return major * 10 + minor
+    except Exception:
+        return 0
+
+
+def _engine_dtype_name(dt) -> str:
+    if dt == _tm.DataType.TYPE_FP16:
+        return 'fp16'
+    if dt == _tm.DataType.TYPE_BF16:
+        return 'bf16'
+    return 'other'
+
+
+def _quantize_embed_table(table, fmt):
+    """Quantize a CPU checkpoint table on the GPU and return CPU-staged
+    ``(q, scale, zero)``. The GPU source and quantization temporaries are
+    released before returning so the load-time peak stays at the final
+    model size instead of the model plus a staged table."""
+    src = table.cuda()
+    q, s, z = quantize_table(src, fmt)
+    del src
+    q, s = q.cpu(), s.cpu()
+    if z is not None:
+        z = z.cpu()
+    torch.cuda.empty_cache()
+    return q, s, z
+
+
+def add_embedding_and_head(model, builder, pfx, embed_key, *, tie,
+                           head_key='lm_head'):
+    """Wire the embedding + output head by executing the resolved plan.
+
+    Plan actions:
+        ``native``: legacy two-tensor path; the embed table is read from the
+            checkpoint (quantized when a sidecar is loaded) and the head is
+            the tied embed prefix when ``tie`` is set, otherwise ``head_key``.
+        ``sidecar``: the offline sidecar's quantized table + shared head.
+        ``shared``: the checkpoint table is used as the head table directly.
+        ``shared_quant``: the checkpoint table is quantized online (group 128)
+            and shared with the head.
+
+    Untied models and ``--embed-head off`` always take ``native``.
+    """
+    i8 = pfx.has(embed_key + EMBED_I8_SUFFIX)
+    i4 = pfx.has(embed_key + EMBED_I4_SUFFIX)
+    sidecar = 'int8' if i8 else 'int4' if i4 else ('native' if pfx.has(SHARED_HEAD_KEY) else None)
+    table = None
+    if i8:
+        quant_table = pfx.get_cpu(embed_key + EMBED_I8_SUFFIX)
+        hidden = quant_table.shape[-1]
+    elif i4:
+        quant_table = pfx.get_cpu(embed_key + EMBED_I4_SUFFIX)
+        hidden = quant_table.shape[-1] * 2
+    else:
+        quant_table = None
+        table = pfx.get_cpu(embed_key)
+        hidden = table.shape[-1]
+    resolver = getattr(model, '_resolver', None)
+    fmt = getattr(resolver, 'embed_head_format', 'native')
+    plan = resolve_embed_head(
+        tie=tie, sidecar_format=sidecar,
+        mode=getattr(resolver, 'embed_head', 'auto'),
+        fmt=fmt,
+        env_disabled=os.environ.get('LMDEPLOY_DISABLE_EMBED_QUANT') == '1',
+        sm_version=_sm_version(), tp_size=builder.tp.size,
+        engine_dtype=_engine_dtype_name(builder.config.data_type), hidden=hidden)
+    logger.info('embed head: %s (%s)', plan.action, plan.reason)
+    if plan.action == 'error':
+        raise RuntimeError(plan.error)
+
+    if plan.action == 'sidecar':
+        if fmt not in ('native', plan.table_format):
+            logger.warning('embed head: --embed-head-format %s conflicts with the '
+                           'sidecar format %s; using the sidecar', fmt, plan.table_format)
+        if i8:
+            builder.add_token_embeds_quant(quant_table,
+                                           pfx.get_cpu(embed_key + EMBED_I8_SCALE_SUFFIX))
+        elif i4:
+            builder.add_token_embeds_quant4(quant_table,
+                                            pfx.get_cpu(embed_key + EMBED_I4_SCALE_SUFFIX),
+                                            pfx.get_cpu(embed_key + EMBED_I4_ZERO_SUFFIX))
+        else:
+            builder.add_token_embeds(table)
+        builder.add_lm_head_shared()
+        return
+    if plan.action == 'shared':
+        if table.dtype not in (torch.float16, torch.bfloat16):
+            logger.info('embed head: native table dtype %s -> engine dtype', table.dtype)
+        builder.add_token_embeds(table)
+        builder.add_lm_head_shared()
+        return
+    if plan.action == 'shared_quant':
+        q, s, z = _quantize_embed_table(table, plan.table_format)
+        if z is None:
+            builder.add_token_embeds_quant(q, s)
+        else:
+            builder.add_token_embeds_quant4(q, s, z)
+        builder.add_lm_head_shared()
+        return
+    # native (legacy semantics)
+    if i8:
+        builder.add_token_embeds_quant(quant_table,
+                                       pfx.get_cpu(embed_key + EMBED_I8_SCALE_SUFFIX))
+    elif i4:
+        builder.add_token_embeds_quant4(quant_table,
+                                        pfx.get_cpu(embed_key + EMBED_I4_SCALE_SUFFIX),
+                                        pfx.get_cpu(embed_key + EMBED_I4_ZERO_SUFFIX))
+    else:
+        builder.add_token_embeds(table)
+    if tie:
+        builder.add_lm_head(model._linear(pfx + embed_key[:-len('.weight')]))
+    else:
+        builder.add_lm_head(model._linear(pfx + head_key))
 
 
 def read_packed_moe_expert(

@@ -77,6 +77,8 @@ class CLI:
         tb_group._group_actions.append(quant_policy)
         tb_group._group_actions.append(language_model_only)
         ArgumentHelper.model_format(tb_group)
+        ArgumentHelper.embed_head(tb_group)
+        ArgumentHelper.embed_head_format(tb_group)
         ArgumentHelper.rope_scaling_factor(tb_group)
         ArgumentHelper.communicator(tb_group)
         ArgumentHelper.moe_a2a_backend(tb_group)

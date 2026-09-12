@@ -28,7 +28,9 @@ logger = get_logger('lmdeploy')
 
 def _build_resolver(model_format: str | None,
                     group_size: int | None,
-                    dtype: torch.dtype) -> (WeightFormatResolver, torch.dtype):
+                    dtype: torch.dtype,
+                    embed_head: str = 'auto',
+                    embed_head_format: str = 'native') -> (WeightFormatResolver, torch.dtype):
     """Build the active resolver: quantized format (if any) + trivial fallback.
 
     Called after the int4 fp16 force but before the ``compressed-tensors →
@@ -53,7 +55,8 @@ def _build_resolver(model_format: str | None,
     else:
         raise ValueError(f'unknown model_format: {model_format!r}')
     formats.append(TrivialFormat())
-    return WeightFormatResolver(data_type=_torch_dtype_to_cpp(dtype), formats=formats), dtype
+    return WeightFormatResolver(data_type=_torch_dtype_to_cpp(dtype), formats=formats,
+                                embed_head=embed_head, embed_head_format=embed_head_format), dtype
 
 
 def _deep_merge(base: dict, override: dict, path: str = '') -> dict:
@@ -220,7 +223,9 @@ def get_tm_config(model_path,
     # Build resolver after dtype is finalized but before the CT→AWQ rename,
     # so compressed-tensors models instantiate CompressedTensorFormat.
     resolver, dtype = _build_resolver(engine_config.model_format,
-                                      group_size, dtype)
+                                      group_size, dtype,
+                                      embed_head=engine_config.embed_head,
+                                      embed_head_format=engine_config.embed_head_format)
 
     engine_config.dtype = str(dtype).split('.')[1]
 

@@ -22,6 +22,7 @@ from ..linear import transform_output_dim
 from ..text_model import TextModel
 from .base import INPUT_MODELS
 from .utils import (
+    add_embedding_and_head,
     make_attention_config,
     make_ffn_config,
     make_model_weight_config,
@@ -74,12 +75,10 @@ class InternLM2Model(TextModel):
             root_handles=self._root_handles,
             tp=self._model_tp,
             vocab_size=self.cfg.vocab_size)
-        builder.add_token_embeds(pfx.get('model.tok_embeddings.weight'))
+        add_embedding_and_head(self, builder, pfx, 'model.tok_embeddings.weight',
+                               tie=self.cfg.tie_word_embeddings,
+                               head_key='output')
         builder.norm = self.norm(pfx + 'model.norm')
-        lm_pfx = (pfx + 'model.tok_embeddings'
-                  if self.cfg.tie_word_embeddings
-                  else pfx + 'output')
-        builder.add_lm_head(self._linear(lm_pfx))
         builder.layers = self.layers(pfx + 'model.layers')
         builder.build()
 

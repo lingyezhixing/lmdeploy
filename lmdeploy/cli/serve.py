@@ -135,6 +135,8 @@ class SubCliServe:
         max_prefill_token_num_act = ArgumentHelper.max_prefill_token_num(pt_group)
         quant_policy = ArgumentHelper.quant_policy(pt_group)
         model_format = ArgumentHelper.model_format(pt_group)
+        embed_head = ArgumentHelper.embed_head(pt_group)
+        embed_head_format = ArgumentHelper.embed_head_format(pt_group)
         hf_overrides = ArgumentHelper.hf_overrides(pt_group)
         disable_metrics = ArgumentHelper.disable_metrics(pt_group)
         dp = ArgumentHelper.dp(pt_group)
@@ -162,6 +164,8 @@ class SubCliServe:
         tb_group._group_actions.append(max_prefill_token_num_act)
         tb_group._group_actions.append(quant_policy)
         tb_group._group_actions.append(model_format)
+        tb_group._group_actions.append(embed_head)
+        tb_group._group_actions.append(embed_head_format)
         tb_group._group_actions.append(num_nodes_act)
         tb_group._group_actions.append(node_rank_act)
         tb_group._group_actions.append(hf_overrides)
@@ -299,6 +303,8 @@ class SubCliServe:
                                                    max_batch_size=max_batch_size,
                                                    session_len=args.session_len,
                                                    model_format=args.model_format,
+                                                   embed_head=args.embed_head,
+                                                   embed_head_format=args.embed_head_format,
                                                    quant_policy=args.quant_policy,
                                                    rope_scaling_factor=args.rope_scaling_factor,
                                                    cache_max_entry_count=args.cache_max_entry_count,

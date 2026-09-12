@@ -55,6 +55,7 @@ from ..vision_model import VisionModel
 from ..weight_format import TrivialFormat
 from .base import INPUT_MODELS
 from .utils import (
+    add_embedding_and_head,
     make_attention_config,
     make_ffn_config,
     make_model_weight_config,
@@ -136,15 +137,13 @@ class Qwen3_5TextModel(TextModel):
             root_handles=self._root_handles,
             tp=self._model_tp,
             vocab_size=self.cfg.vocab_size)
-        builder.add_token_embeds(pfx.get('model.language_model.embed_tokens.weight'))
+        add_embedding_and_head(
+            self, builder, pfx, 'model.language_model.embed_tokens.weight',
+            tie=self.cfg.tie_word_embeddings)
         builder.norm = self.norm(
             pfx + 'model.language_model.norm',
             zero_centered=True,
         )
-        lm_pfx = (pfx + 'model.language_model.embed_tokens'
-                  if self.cfg.tie_word_embeddings
-                  else pfx + 'lm_head')
-        builder.add_lm_head(self._linear(lm_pfx))
         builder.layers = self.layers(pfx + 'model.language_model.layers')
         builder.build()
 
