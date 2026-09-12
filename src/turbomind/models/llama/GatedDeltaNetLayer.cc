@@ -373,18 +373,18 @@ void GatedDeltaNetLayer::Forward(ForwardParam param)
 
     Tensor all_proj;
     TM_SCOPE_CALL(linear_.Forward(param.input, *weights.in_proj_all, all_proj));
+    Tensor ba_proj;
+    TM_SCOPE_CALL(linear_.Forward(param.input, *weights.in_proj_ba, ba_proj));
 
     const int value_heads       = num_v_heads_;
-    const int value_gate_offset = conv_dim + value_dim;
-    const int decay_gate_offset = value_gate_offset + value_heads;
 
     const core::ssize_t gate_capacity = core::ssize_t(token_num) * gate_stride_;
     const core::Layout  gate_layout{{1, token_num, num_v_heads_}, {gate_capacity, gate_stride_, 1}};
     Tensor beta{core::Buffer{gate_capacity, kFloat32, device}, gate_layout, Tensor::PreserveBufferCapacity{}};
     Tensor g{core::Buffer{gate_capacity, kFloat32, device}, gate_layout, Tensor::PreserveBufferCapacity{}};
 
-    Tensor beta_projection  = all_proj.slice({0, value_gate_offset}, {-1, value_heads});
-    Tensor decay_projection = all_proj.slice({0, decay_gate_offset}, {-1, value_heads});
+    Tensor beta_projection  = ba_proj.slice({0, 0}, {-1, value_heads});
+    Tensor decay_projection = ba_proj.slice({0, value_heads}, {-1, value_heads});
     ComputeBetaG(beta, g, beta_projection, decay_projection, weights.A_log, weights.dt_bias, stream);
 
     Tensor attn_out{{token_num, value_dim}, dtype, device};

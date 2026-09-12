@@ -3,7 +3,7 @@
 
 Provides ``DeltaNetBuilder`` for committing DeltaNet weights (GDN input
 projections, scalar params, conv1d) and helper functions ``split_qkv``
-and ``fuse_gdn``.
+and the output-fusion helpers ``fuse_qkvz`` / ``fuse_ba``.
 """
 from __future__ import annotations
 
@@ -48,15 +48,26 @@ def _fuse_tp_interleave(*tensors: torch.Tensor, tp: int) -> torch.Tensor:
 
 
 @transform_output_dim
-def fuse_gdn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-             z: torch.Tensor, b: torch.Tensor, a: torch.Tensor, *,
-             tp: int) -> torch.Tensor:
-    """Fuse GDN input projections with TP interleaving.
+def fuse_qkvz(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+              z: torch.Tensor, *, tp: int) -> torch.Tensor:
+    """Fuse the big GDN input projections with TP interleaving.
 
-    Layout per tp-shard: [Q | K | V | Z | B | A].
+    Layout per tp-shard: [Q | K | V | Z].
     ``@transform_output_dim`` handles 1-D bias and ``None`` passthrough.
     """
-    tensors = [t for t in (q, k, v, z, b, a) if t is not None]
+    tensors = [t for t in (q, k, v, z) if t is not None]
+    return _fuse_tp_interleave(*tensors, tp=tp)
+
+
+@transform_output_dim
+def fuse_ba(b: torch.Tensor, a: torch.Tensor, *, tp: int) -> torch.Tensor:
+    """Fuse the GDN gate pair with TP interleaving.
+
+    Layout per tp-shard: [B | A]. Kept separate from ``fuse_qkvz`` so a
+    higher-precision gate pair cannot force the big projection into a
+    trivial (fp16) format during mixed-format fusion.
+    """
+    tensors = [t for t in (b, a) if t is not None]
     return _fuse_tp_interleave(*tensors, tp=tp)
 
 
@@ -75,17 +86,26 @@ class DeltaNetBuilder(Builder):
 
     def add_input_projections(self, *, in_proj_qkv, in_proj_z=None,
                               in_proj_b=None, in_proj_a=None, out_proj=None):
-        """Fuse GDN input projections via pipeline, commit all linears.
+        """Fuse GDN input projections into two linears, commit all linears.
 
-        Pipeline: split_qkv -> dequant_mixed -> fuse_gdn -> commit.
+        Pipeline: split_qkv -> dequant_mixed -> fuse_qkvz / fuse_ba -> commit.
+        The big ``[Q|K|V|Z]`` projection and the ``[B|A]`` gate pair are
+        committed separately so mixed quantization formats (e.g. int4 qkv/z
+        with fp16 gates) keep their own formats instead of being dequantized
+        to a common trivial format.
         """
         q, k, v = split_qkv(in_proj_qkv,
                             num_k_heads=self.config.num_k_heads,
                             num_v_heads=self.config.num_v_heads)
-        q, k, v, z, b, a = dequant_mixed(q, k, v, in_proj_z, in_proj_b, in_proj_a,
-                                           data_type=self.config.data_type)
-        fused = fuse_gdn(q, k, v, z, b, a, tp=self.tp.size)
+        q, k, v, z = dequant_mixed(q, k, v, in_proj_z,
+                                   data_type=self.config.data_type)
+        fused = fuse_qkvz(q, k, v, z, tp=self.tp.size)
         self._add_linear('in_proj_all', fused, SplitSide.OUTPUT)
+        if in_proj_b is not None or in_proj_a is not None:
+            b, a = dequant_mixed(in_proj_b, in_proj_a,
+                                 data_type=self.config.data_type)
+            gate = fuse_ba(b, a, tp=self.tp.size)
+            self._add_linear('in_proj_ba', gate, SplitSide.OUTPUT)
         if out_proj is not None:
             self._add_linear('out_proj', out_proj, SplitSide.INPUT)
 
