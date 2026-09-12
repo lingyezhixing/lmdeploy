@@ -790,7 +790,8 @@ PYBIND11_MODULE(_turbomind, m)
            std::shared_ptr<Tensor> scale,
            std::shared_ptr<Tensor> zero,
            int                     group,
-           std::uintptr_t          stream_ptr) {
+           std::uintptr_t          stream_ptr,
+           int                     impl) {
             TM_CHECK(logits && x && table && scale);
             ft::invokeLogitsFromTable(ft::Ref<Tensor>{*logits},
                                       *x,
@@ -798,7 +799,8 @@ PYBIND11_MODULE(_turbomind, m)
                                       *scale,
                                       zero ? *zero : ft::Tensor{},
                                       group,
-                                      reinterpret_cast<cudaStream_t>(stream_ptr));
+                                      reinterpret_cast<cudaStream_t>(stream_ptr),
+                                      impl);
         },
         "logits"_a,
         "x"_a,
@@ -806,7 +808,8 @@ PYBIND11_MODULE(_turbomind, m)
         "scale"_a,
         "zero"_a,
         "group"_a,
-        "stream_ptr"_a = std::uintptr_t{0});
+        "stream_ptr"_a = std::uintptr_t{0},
+        "impl"_a       = -1);
 
     py::bind_map<TensorMap, std::shared_ptr<TensorMap>>(m, "TensorMap");
 

@@ -53,6 +53,18 @@ __device__ __forceinline__ T cvt_f(float v)
     }
 }
 
+template<class T>
+__device__ __forceinline__ float f32_of(T v)
+{
+    static_assert(std::is_same_v<T, __half> || std::is_same_v<T, __nv_bfloat16>,
+                  "f32_of expects a 16-bit operand type");
+    if constexpr (std::is_same_v<T, __half>) {
+        return __half2float(v);
+    } else {
+        return __bfloat162float(v);
+    }
+}
+
 // Pack two 16-bit operands, even k in the low half, matching load_f2's
 // little-endian pair order.
 template<class T>
@@ -412,6 +424,148 @@ __global__ void logitsFromTableMmaKernel(void* __restrict__ logits_,
 #endif  // __CUDA_ARCH__ >= 800
 }
 
+// ---------------------------------------------------------------------------
+// GEMV decode path (tokens <= 16): one warp per vocabulary row, lanes stride
+// over 16-byte table vectors and accumulate every token row in registers.
+// The x block (tokens * dim * 2 B) is tiny and stays L1/L2-resident, so the
+// weights are streamed exactly once with no smem staging: the mma path pays
+// its fragment/pipeline overhead for M that never fills the 16x16 tiles,
+// while this path is purely DRAM-bound.
+//
+// A 16-byte table vector never crosses a 128-element dequant group boundary
+// (8/16/32 divides 128), so one scale (and zero) lookup per vector suffices.
+// ---------------------------------------------------------------------------
+
+template<class U>
+__device__ __forceinline__ float2 ld_pair(const U* p)
+{
+    static_assert(std::is_same_v<U, __half> || std::is_same_v<U, __nv_bfloat16>,
+                  "ld_pair expects a 16-bit operand type");
+    if constexpr (std::is_same_v<U, __half>) {
+        return __half22float2(*reinterpret_cast<const __half2*>(p));
+    } else {
+        return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(p));
+    }
+}
+
+template<int FORMAT, class T, class TA>
+__global__ void logitsFromTableGemvKernel(void* __restrict__ logits_,
+                                          int                  vocab,
+                                          const void* __restrict__ x_,
+                                          int                  tokens,
+                                          const void* __restrict__ table_,
+                                          const void* __restrict__ scale_,
+                                          const void* __restrict__ zero_,
+                                          int                  dim)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    constexpr int VEC        = FORMAT == 0 ? 8 : FORMAT == 1 ? 16 : 32;  // table elements per 16 B
+    constexpr int GROUP_VECS = 128 / VEC;
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int row  = blockIdx.x * (blockDim.x >> 5) + warp;
+    if (row >= vocab) {
+        return;
+    }
+
+    const T*  x     = reinterpret_cast<const T*>(x_);
+    const T*  scale = reinterpret_cast<const T*>(scale_);
+    const auto* zero = reinterpret_cast<const uint8_t*>(zero_);
+
+    const int   ngroups   = FORMAT == 0 ? 0 : dim / 128;
+    const int   row_bytes = FORMAT == 0 ? dim * (int)sizeof(TA) : FORMAT == 2 ? dim / 2 : dim;
+    const int   nvec      = row_bytes / 16;
+    const char* row_ptr   = reinterpret_cast<const char*>(table_) + (size_t)row * row_bytes;
+
+    float acc[16];
+#pragma unroll
+    for (int t = 0; t < 16; ++t) {
+        acc[t] = 0.f;
+    }
+
+    for (int v = lane; v < nvec; v += 32) {
+        float s = 1.f;
+        float z = 0.f;
+        if (FORMAT != 0) {
+            const int g = v / GROUP_VECS;
+            s           = f32_of(scale[(size_t)row * ngroups + g]);
+            if (FORMAT == 2) {
+                z = (float)zero[(size_t)row * ngroups + g];
+            }
+        }
+
+        const int   k   = v * VEC;
+        const uint4 raw = *reinterpret_cast<const uint4*>(row_ptr + (size_t)v * 16);
+
+        // Dequantize the table vector once; every token row reuses it.
+        float wv[VEC];
+        if (FORMAT == 0) {
+            const TA* wp = reinterpret_cast<const TA*>(&raw);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) {
+                const float2 w = ld_pair<TA>(wp + i * 2);
+                wv[2 * i]      = f32_of(cvt_f<T>(w.x));
+                wv[2 * i + 1]  = f32_of(cvt_f<T>(w.y));
+            }
+        } else if (FORMAT == 1) {
+            const auto* wb = reinterpret_cast<const unsigned char*>(&raw);
+#pragma unroll
+            for (int i = 0; i < 16; ++i) {
+                wv[i] = f32_of(cvt_f<T>((float)(int8_t)wb[i] * s));
+            }
+        } else {
+            const auto* wb = reinterpret_cast<const unsigned char*>(&raw);
+#pragma unroll
+            for (int i = 0; i < 16; ++i) {
+                wv[2 * i]     = f32_of(cvt_f<T>(((float)(wb[i] & 0xF) - z) * s));
+                wv[2 * i + 1] = f32_of(cvt_f<T>(((float)(wb[i] >> 4) - z) * s));
+            }
+        }
+
+        // The token count is warp-uniform, so the guard keeps all 16 bodies
+        // unrolled (acc[] stays in registers) and only predicates the work.
+#pragma unroll
+        for (int t = 0; t < 16; ++t) {
+            if (t >= tokens) {
+                continue;
+            }
+            const T* xp  = x + (size_t)t * dim + k;
+            float    dot = 0.f;
+#pragma unroll
+            for (int i = 0; i < VEC / 2; ++i) {
+                const float2 a = ld_pair<T>(xp + i * 2);
+                dot += wv[2 * i] * a.x + wv[2 * i + 1] * a.y;
+            }
+            acc[t] += dot;
+        }
+    }
+
+#pragma unroll
+    for (int t = 0; t < 16; ++t) {
+        if (t >= tokens) {
+            continue;
+        }
+        float v = acc[t];
+#pragma unroll
+        for (int off = 16; off; off >>= 1) {
+            v += __shfl_xor_sync(0xFFFFFFFFu, v, off);
+        }
+        if (lane == t) {
+            reinterpret_cast<T*>(logits_)[(size_t)t * vocab + row] = cvt_f<T>(v);
+        }
+    }
+#else
+    // Pre-SM80 instantiation: same loud NaN fill as the mma path (see above).
+    auto*        raw   = reinterpret_cast<unsigned char*>(logits_);
+    const size_t bytes = (size_t)tokens * (size_t)vocab * sizeof(T);
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < bytes;
+         i += (size_t)gridDim.x * blockDim.x) {
+        raw[i] = 0xFF;
+    }
+#endif  // __CUDA_ARCH__ >= 800
+}
+
 }  // namespace
 
 void invokeLogitsFromTable(Ref<Tensor>   logits,
@@ -420,7 +574,8 @@ void invokeLogitsFromTable(Ref<Tensor>   logits,
                            const Tensor& scale,
                            const Tensor& zero,
                            int           group,
-                           cudaStream_t  st)
+                           cudaStream_t  st,
+                           int           impl)
 {
     TM_CHECK(getSMVersion() >= 80)
         << "shared-table head requires SM80 or newer; use LMDEPLOY_DISABLE_EMBED_QUANT=1 or regenerate the "
@@ -539,6 +694,64 @@ void invokeLogitsFromTable(Ref<Tensor>   logits,
     }
 
     const int format = table_is_int4 ? 2 : table_is_int8 ? 1 : 0;
+
+    if (impl < 0) {
+        // Decode-sized batches take the GEMV path while the weight read still
+        // dominates: its per-lane x reads are narrower than the mma path's
+        // staged fragments, so it stops winning once the batch amortizes the
+        // tiles (see the measured cross-over in the head micro-benchmark).
+        const int gemv_max_tokens = format == 0 ? 8 : format == 1 ? 2 : 0;
+        impl                      = tokens <= gemv_max_tokens ? 1 : 0;
+    }
+    TM_CHECK(impl == 0 || impl == 1) << "invalid shared-table head implementation selector: " << impl;
+
+    if (impl == 1) {
+        TM_CHECK(tokens >= 1 && tokens <= 16)
+            << "the GEMV shared-table head path supports 1 <= tokens <= 16 (decode); got tokens=" << tokens;
+        constexpr int kThreads = 256;
+        constexpr int kWarps   = kThreads / 32;
+        const dim3    grid((vocab + kWarps - 1) / kWarps);
+#define LAUNCH_LOGITS_GEMV(TT, TA, FMT)                                                                \
+    logitsFromTableGemvKernel<FMT, TT, TA><<<grid, kThreads, 0, st>>>(logits.get().raw_data(),         \
+                                                                      vocab,                           \
+                                                                      x.raw_data(),                    \
+                                                                      tokens,                          \
+                                                                      table.raw_data(),                \
+                                                                      scale.data_or<void>((void*)nullptr), \
+                                                                      zero.data_or<void>((void*)nullptr),  \
+                                                                      dim)
+        if (format == 0) {
+            if (x_is_half) {
+                if (table_is_half) {
+                    LAUNCH_LOGITS_GEMV(__half, __half, 0);
+                } else {
+                    LAUNCH_LOGITS_GEMV(__half, __nv_bfloat16, 0);
+                }
+            } else {
+                if (table_is_half) {
+                    LAUNCH_LOGITS_GEMV(__nv_bfloat16, __half, 0);
+                } else {
+                    LAUNCH_LOGITS_GEMV(__nv_bfloat16, __nv_bfloat16, 0);
+                }
+            }
+        } else if (format == 1) {
+            if (x_is_half) {
+                LAUNCH_LOGITS_GEMV(__half, __half, 1);
+            } else {
+                LAUNCH_LOGITS_GEMV(__nv_bfloat16, __nv_bfloat16, 1);
+            }
+        } else {
+            if (x_is_half) {
+                LAUNCH_LOGITS_GEMV(__half, __half, 2);
+            } else {
+                LAUNCH_LOGITS_GEMV(__nv_bfloat16, __nv_bfloat16, 2);
+            }
+        }
+#undef LAUNCH_LOGITS_GEMV
+        TM_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
     if (format == 0) {
         if (x_is_half) {
             if (table_is_half) {
