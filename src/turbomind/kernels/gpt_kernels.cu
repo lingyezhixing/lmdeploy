@@ -29,6 +29,8 @@ namespace turbomind {
 template<class TFrom>
 __device__ __forceinline__ float cvt_to_float(TFrom v)
 {
+    static_assert(std::is_same_v<TFrom, __half> || std::is_same_v<TFrom, __nv_bfloat16>,
+                  "cvt_to_float expects a 16-bit type");
     if constexpr (std::is_same_v<TFrom, __half>) {
         return __half2float(v);
     } else {
@@ -39,6 +41,8 @@ __device__ __forceinline__ float cvt_to_float(TFrom v)
 template<class TTo>
 __device__ __forceinline__ TTo cvt_from_float(float v)
 {
+    static_assert(std::is_same_v<TTo, __half> || std::is_same_v<TTo, __nv_bfloat16>,
+                  "cvt_from_float expects a 16-bit type");
     if constexpr (std::is_same_v<TTo, __half>) {
         return __float2half(v);
     } else {
@@ -48,7 +52,7 @@ __device__ __forceinline__ TTo cvt_from_float(float v)
 
 template<class TOut, class TTable, int vec_size>
 __global__ void
-embeddingLookupKernel(TOut* dst, int dst_stride, const TTable* src, int src_stride, const int* ids, int num, int dim)
+embeddingLookupKernel(TOut* dst, int dst_stride, const TTable* src, int src_stride, const int* ids, int dim)
 {
     const int ti = blockIdx.x;
 
@@ -112,7 +116,6 @@ void invokeEmbeddingLookup(Ref<Tensor>         out_,
             (const TTable*)embedding_table.raw_data(),
             embedding_table.stride(0),
             token_ids.data(),
-            num,
             dim);
     };
 
@@ -132,7 +135,6 @@ __global__ void embeddingLookupInt8Kernel(T*            dst,
                                           const T*      scales,
                                           int           scales_stride,
                                           const int*    ids,
-                                          int           num,
                                           int           dim,
                                           int           group)
 {
@@ -175,7 +177,6 @@ void invokeEmbeddingLookupInt8(Ref<Tensor>         out_,
                                                               (const T*)scales.raw_data(),
                                                               (int)scales.stride(0),
                                                               token_ids.data(),
-                                                              num,
                                                               dim,
                                                               group);
         TM_CUDA_CHECK(cudaGetLastError());

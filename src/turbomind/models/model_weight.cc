@@ -48,8 +48,7 @@ void ModelWeight::prepare()
     num_layer         = layers->size();
     if (output_from_tok_embeddings) {
         vocab_size_padded = vocab_size;
-    }
-    else {
+    } else {
         vocab_size_padded = TM_CHECK_NOTNULL(output)->output_dim * tp_size;
     }
 
@@ -62,7 +61,7 @@ void ModelWeight::prepare()
         TM_CHECK(tok_embeddings_scale) << "int8 tok_embeddings requires tok_embeddings_scale";
         EnsureFloatDtype(tok_embeddings_scale, data_type);
     }
-    else if (tok_embeddings_zero) {
+    else if (tok_embeddings.dtype() == kUint8) {
         TM_CHECK(tok_embeddings_scale) << "int4 tok_embeddings requires tok_embeddings_scale";
         EnsureFloatDtype(tok_embeddings_scale, data_type);
     }
@@ -101,8 +100,14 @@ bool ModelWeight::verify(std::vector<std::string>& missing)
     if (!tok_embeddings) {
         missing.push_back(full_path() + ": missing tok_embeddings");
     }
-    if (tok_embeddings && tok_embeddings.dtype() == kInt8 && !tok_embeddings_scale) {
-        missing.push_back(full_path() + ": missing tok_embeddings_scale");
+    if (tok_embeddings) {
+        const auto dtype = tok_embeddings.dtype();
+        if ((dtype == kInt8 || dtype == kUint8) && !tok_embeddings_scale) {
+            missing.push_back(full_path() + ": missing tok_embeddings_scale");
+        }
+        if (dtype == kUint8 && !tok_embeddings_zero) {
+            missing.push_back(full_path() + ": missing tok_embeddings_zero");
+        }
     }
     if (!norm) {
         missing.push_back(full_path() + ": missing norm");

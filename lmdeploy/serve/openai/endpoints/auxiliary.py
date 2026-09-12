@@ -67,12 +67,24 @@ def register(router: APIRouter, server_context) -> None:
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          'Invalid input type.')
 
+        if any(len(ids) == 0 for ids in input_ids):
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'Input must not be empty.')
+        if request.dimensions is not None and request.dimensions < 1:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'dimensions must be at least 1.')
+
         # Get embeddings via hidden state extraction
         batch_embeddings = await async_engine.async_get_embeddings(input_ids)
 
         # Optional dimension truncation
         dimensions = request.dimensions
         if dimensions is not None:
+            hidden_size = batch_embeddings[0].shape[0] if batch_embeddings else 0
+            if dimensions > hidden_size:
+                return create_error_response(
+                    HTTPStatus.BAD_REQUEST,
+                    f'dimensions must not exceed the embedding size ({hidden_size}).')
             batch_embeddings = [emb[:dimensions] for emb in batch_embeddings]
 
         prompt_tokens = sum(len(ids) for ids in input_ids)
@@ -114,6 +126,9 @@ def register(router: APIRouter, server_context) -> None:
         if not request.documents:
             return create_error_response(HTTPStatus.BAD_REQUEST,
                                          'Documents list cannot be empty.')
+        if request.top_n is not None and request.top_n < 1:
+            return create_error_response(HTTPStatus.BAD_REQUEST,
+                                         'top_n must be at least 1.')
 
         # Compute rerank scores
         scored_results, prompt_tokens = \

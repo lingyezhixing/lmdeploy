@@ -128,14 +128,20 @@ struct LanguageModel::Impl {
         const auto& table = weights_.tok_embeddings;
         if (table.dtype() == kInt8) {
             const auto& scales = weights_.tok_embeddings_scale;
-            const int   group  = (int)table.shape(1) / (int)scales.shape(1);
-            TM_CHECK_EQ((int)table.shape(1) % group, 0);
+            TM_CHECK(scales) << "int8 tok_embeddings requires tok_embeddings_scale";
+            TM_CHECK_EQ((int)table.shape(1) % (int)scales.shape(1), 0)
+                << "embedding hidden size must be divisible by the scale group count";
+            const int group = (int)table.shape(1) / (int)scales.shape(1);
             invokeEmbeddingLookupInt8(out, ids, table, scales, group, st);
         }
         else if (table.dtype() == kUint8) {
             const auto& scales = weights_.tok_embeddings_scale;
             const auto& zeros  = weights_.tok_embeddings_zero;
-            const int   group  = (int)table.shape(1) * 2 / (int)scales.shape(1);
+            TM_CHECK(scales && zeros) << "int4 tok_embeddings requires tok_embeddings_scale and tok_embeddings_zero";
+            const int hidden = (int)table.shape(1) * 2;
+            TM_CHECK_EQ(hidden % (int)scales.shape(1), 0)
+                << "embedding hidden size must be divisible by the scale group count";
+            const int group = hidden / (int)scales.shape(1);
             invokeEmbeddingLookupInt4(out, ids, table, scales, zeros, group, st);
         }
         else {
@@ -326,7 +332,9 @@ Tensor LanguageModel::Impl::PostEmbedding(const Tensor& features, Buffer symm_bu
         if (scale) {
             TM_CHECK((int)scale.shape(1) > 0);
             const int hidden = table.dtype() == kUint8 ? (int)table.shape(1) * 2 : (int)table.shape(1);
-            group            = hidden / (int)scale.shape(1);
+            TM_CHECK_EQ(hidden % (int)scale.shape(1), 0)
+                << "embedding hidden size must be divisible by the scale group count";
+            group = hidden / (int)scale.shape(1);
         }
         TM_SCOPE_CALL(invokeLogitsFromTable(logits,
                                             features,

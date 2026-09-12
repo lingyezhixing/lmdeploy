@@ -15,6 +15,7 @@ from .. import _tm
 from ..builders import _act_type_id
 from ..builders.linear import Linear, _build_linear, _dequant_linear
 from ..embed_quant import (
+    DISABLE_ENV,
     EMBED_I4_SCALE_SUFFIX,
     EMBED_I4_SUFFIX,
     EMBED_I4_ZERO_SUFFIX,
@@ -451,7 +452,7 @@ def add_embedding_and_head(model, builder, pfx, embed_key, *, tie,
         tie=tie, sidecar_format=sidecar,
         mode=getattr(ctx, 'embed_head', 'auto'),
         fmt=fmt,
-        env_disabled=os.environ.get('LMDEPLOY_DISABLE_EMBED_QUANT') == '1',
+        env_disabled=os.environ.get(DISABLE_ENV) == '1',
         sm_version=_sm_version(), tp_size=builder.tp.size,
         engine_dtype=_engine_dtype_name(builder.config.data_type), hidden=hidden)
     logger.info('embed head: %s (%s)', plan.action, plan.reason)
@@ -498,6 +499,8 @@ def add_embedding_and_head(model, builder, pfx, embed_key, *, tie,
     else:
         builder.add_token_embeds(table)
     if tie:
+        if not embed_key.endswith('.weight'):
+            raise RuntimeError(f'embed key must end with .weight, got {embed_key!r}')
         builder.add_lm_head(model._linear(pfx + embed_key[:-len('.weight')]))
     else:
         builder.add_lm_head(model._linear(pfx + head_key))

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -74,9 +75,23 @@ def test_sidecar_skipped_when_embed_head_off(tmp_path):
     assert not ckpt.has('lm_head.weight_from_embed')
 
 
-def test_model_loader_threads_embed_head(tmp_path, monkeypatch):
-    from types import SimpleNamespace
+def test_sidecar_not_scanned_as_weight_shard(tmp_path, monkeypatch):
+    """The ``*.safetensors`` fallback must not pick up embed_quant.safetensors
+    as if it were a weight shard; otherwise --embed-head off/env-disable is
+    silently bypassed."""
+    (tmp_path / 'config.json').write_text(json.dumps({'tie_word_embeddings': True}))
+    save_file({'model.embed_tokens.weight': torch.zeros(4, 8, dtype=torch.bfloat16)},
+              str(tmp_path / 'weights.safetensors'))
+    _write_sidecar(tmp_path, {
+        'model.embed_tokens.weight_i8': torch.zeros(4, 8, dtype=torch.int8)})
+    monkeypatch.setenv('LMDEPLOY_DISABLE_EMBED_QUANT', '1')
+    ckpt = create_checkpoint(str(tmp_path))
+    assert ckpt.has('model.embed_tokens.weight')
+    assert not ckpt.has('model.embed_tokens.weight_i8')
 
+
+@pytest.mark.parametrize('export_method', ['export', 'export_iter'])
+def test_model_loader_threads_embed_head(tmp_path, monkeypatch, export_method):
     import lmdeploy.turbomind.model_loader as model_loader
 
     captured = {}
@@ -100,37 +115,10 @@ def test_model_loader_threads_embed_head(tmp_path, monkeypatch):
     loader.model = FakeSourceModel()
     loader.model_path = str(tmp_path)
     loader.engine_config = SimpleNamespace(embed_head='off')
-    loader.export()
-    assert captured['embed_head'] == 'off'
-
-
-def test_model_loader_export_iter_threads_embed_head(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    import lmdeploy.turbomind.model_loader as model_loader
-
-    captured = {}
-
-    class FakeCkpt:
-        def close(self):
-            pass
-
-    def fake_create_checkpoint(model_path, *, mappings=(), embed_head='auto'):
-        captured['embed_head'] = embed_head
-        return FakeCkpt()
-
-    class FakeSourceModel:
-        _loader_mappings = []
-
-        def model(self, pfx):
-            pass
-
-    monkeypatch.setattr(model_loader, 'create_checkpoint', fake_create_checkpoint)
-    loader = model_loader.ModelLoader.__new__(model_loader.ModelLoader)
-    loader.model = FakeSourceModel()
-    loader.model_path = str(tmp_path)
-    loader.engine_config = SimpleNamespace(embed_head='off')
-    gen = loader.export_iter()
-    assert next(gen) == -1
-    gen.close()
+    if export_method == 'export':
+        loader.export()
+    else:
+        gen = loader.export_iter()
+        assert next(gen) == -1
+        gen.close()
     assert captured['embed_head'] == 'off'

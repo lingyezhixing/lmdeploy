@@ -95,6 +95,11 @@ class ChatRunner:
         consumption."""
         options = options or ChatRunnerOptions()
         parser_cls = server_context.response_parser_cls
+        # The response parser reads `enable_thinking` from the request, so the
+        # server-level default must be merged before it is constructed.
+        chat_template_kwargs = _chat_template_kwargs_from_request(request, server_context)
+        if chat_template_kwargs:
+            request = request.model_copy(update={'chat_template_kwargs': chat_template_kwargs})
 
         try:
             if isinstance(request.tool_choice, ToolChoice):

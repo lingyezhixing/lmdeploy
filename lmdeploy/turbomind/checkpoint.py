@@ -17,6 +17,8 @@ from glob import glob
 import torch
 from safetensors import safe_open
 
+from .embed_quant import SIDECAR_NAME
+
 # https://github.com/huggingface/transformers/blob/53fad641cfdb5105e2470bcf3ef17ea8e25cc300/src/transformers/modeling_utils.py#L372
 WEIGHT_INDEX_NAME = 'pytorch_model.bin.index.json'
 WEIGHT_PATTERN = 'pytorch_model*.bin'
@@ -140,6 +142,10 @@ def _gather_shards(model_path: str, index_name: str | None,
     else:
         index = {}
         shards = sorted(glob(osp.join(model_path, file_pattern)))
+    # The embed sidecar is merged by ``load_sidecar`` only; it must never be
+    # picked up as a regular weight shard (e.g. by the ``*.safetensors``
+    # fallback pattern).
+    shards = [s for s in shards if osp.basename(s) != SIDECAR_NAME]
     if not shards:
         raise RuntimeError(
             f'failed to locate weight files under {model_path!r}')

@@ -27,6 +27,7 @@ from lmdeploy.turbomind.embed_quant import (  # noqa: E402
     SIDECAR_NAME,
     dequant_int4_simple,
     dequant_int8,
+    find_embed_file,
     find_embed_key,
     quantize_table,
     write_sidecar,
@@ -43,15 +44,22 @@ def main(argv=None) -> int:
     ap.add_argument('--group', type=int, default=128)
     ap.add_argument('--chunk', type=int, default=8192, help='rows per GPU batch')
     ap.add_argument('--embed-key', default=None)
-    ap.add_argument('--qa-threshold', type=float, default=0.02)
+    ap.add_argument('--qa-threshold', type=float, default=None,
+                    help='max allowed relative L2 error; default 0.02 for int8, 0.12 for int4')
     args = ap.parse_args(argv)
 
     if args.group != 128:
         raise SystemExit(f'only --group 128 is supported, got {args.group}')
 
-    cfg = json.load(open(osp.join(args.model, 'config.json')))
+    cfg_path = osp.join(args.model, 'config.json')
+    try:
+        with open(cfg_path, encoding='utf-8') as f:
+            cfg = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise SystemExit(f'failed to read {cfg_path}: {e}')
     tied = bool(cfg.get('tie_word_embeddings', False))
     embed_key = find_embed_key(args.model, args.embed_key)
+    embed_file = find_embed_file(args.model, embed_key)
     table_format = args.table_format
     if args.bits is not None:
         alias = BITS_TO_FORMAT[args.bits]
@@ -63,7 +71,6 @@ def main(argv=None) -> int:
         table_format = alias
     if table_format is None:
         table_format = 'native'
-    dev = torch.device('cuda')
 
     if table_format == 'native':
         if not tied:
@@ -73,12 +80,14 @@ def main(argv=None) -> int:
         print(f'wrote {SIDECAR_META_NAME} to {args.model} (native table, no tensors)')
         return 0
 
+    dev = torch.device('cuda')
+
     if table_format == 'int4':
         q4_parts, s4_parts, z4_parts = [], [], []
         num4 = den4 = 0.0
-        with safe_open(osp.join(args.model, 'model.safetensors'), 'pt') as f:
+        with safe_open(embed_file, 'pt') as f:
             if embed_key not in f.keys():
-                raise SystemExit(f'{embed_key!r} not found in model.safetensors')
+                raise SystemExit(f'{embed_key!r} not found in {embed_file}')
             t = f.get_tensor(embed_key)
             vocab, hidden = t.shape
             if hidden % args.group != 0:
@@ -95,8 +104,10 @@ def main(argv=None) -> int:
                 print(f'rows {r0 + x.shape[0]}/{vocab}', flush=True)
         rel4 = (num4 / den4) ** 0.5
         print(f'int4 rel-L2 = {rel4:.5f}')
-        if rel4 > 0.12:
-            print(f'WARNING: int4 table rel-L2 {rel4:.5f} > 0.12', file=sys.stderr)
+        qa_threshold = args.qa_threshold if args.qa_threshold is not None else 0.12
+        if rel4 > qa_threshold:
+            print(f'ERROR: int4 rel-L2 {rel4:.5f} > threshold {qa_threshold}', file=sys.stderr)
+            return 1
         write_sidecar(args.model, embed_key, table_format,
                       {embed_key + EMBED_I4_SUFFIX: torch.cat(q4_parts, 0),
                        embed_key + EMBED_I4_SCALE_SUFFIX: torch.cat(s4_parts, 0),
@@ -107,9 +118,9 @@ def main(argv=None) -> int:
 
     q8_parts, s8_parts = [], []
     num = den = 0.0
-    with safe_open(osp.join(args.model, 'model.safetensors'), 'pt') as f:
+    with safe_open(embed_file, 'pt') as f:
         if embed_key not in f.keys():
-            raise SystemExit(f'{embed_key!r} not found in model.safetensors')
+            raise SystemExit(f'{embed_key!r} not found in {embed_file}')
         t = f.get_tensor(embed_key)
         vocab, hidden = t.shape
         if hidden % args.group != 0:
@@ -128,8 +139,9 @@ def main(argv=None) -> int:
     s8 = torch.cat(s8_parts, dim=0)
     rel = (num / den) ** 0.5
     print(f'int8 rel-L2 = {rel:.5f}')
-    if rel > args.qa_threshold:
-        print(f'ERROR: rel-L2 {rel:.5f} > threshold {args.qa_threshold}', file=sys.stderr)
+    qa_threshold = args.qa_threshold if args.qa_threshold is not None else 0.02
+    if rel > qa_threshold:
+        print(f'ERROR: int8 rel-L2 {rel:.5f} > threshold {qa_threshold}', file=sys.stderr)
         return 1
 
     write_sidecar(args.model, embed_key, table_format,
