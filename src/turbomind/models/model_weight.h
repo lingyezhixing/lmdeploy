@@ -18,7 +18,8 @@ struct ModelWeightConfig: ModuleConfig {
     X(int, tp_size)                                                                                                    \
     X(int, tp_rank)                                                                                                    \
     X(DataType, data_type)                                                                                             \
-    X(int, hidden_units)
+    X(int, hidden_units)                                                                                               \
+    X(bool, output_from_tok_embeddings)
 
     MODEL_WEIGHT_FIELDS(TM_MEMBER)
     TM_FOR_EACH(ModelWeightConfig, MODEL_WEIGHT_FIELDS)
@@ -54,7 +55,10 @@ public:
     X(core::ModuleList, layers)                                                                                        \
     X(core::ModuleList, meta_experts)
 
-#define MODEL_WEIGHT_PARAMS(X) X(tok_embeddings)
+#define MODEL_WEIGHT_PARAMS(X)                                                                                         \
+    X(tok_embeddings)                                                                                                  \
+    X(tok_embeddings_scale)                                                                                            \
+    X(tok_embeddings_zero)
 
     TM_MODULE_DECLARE(ModelWeight, MODEL_WEIGHT_CHILDREN, MODEL_WEIGHT_PARAMS)
 
@@ -74,8 +78,9 @@ public:
     std::vector<int> layer_types;
 
     // --- From ModelWeightConfig at construction ---
-    int tp_size{};
-    int tp_rank{};
+    int  tp_size{};
+    int  tp_rank{};
+    bool output_from_tok_embeddings{};
 
 private:
     mutable std::vector<DecoderLayerWeight*> layers_cache_;

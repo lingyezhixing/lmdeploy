@@ -57,7 +57,7 @@ add_library(decoding_kernels STATIC decoding_kernels.cu)
 set_property(TARGET decoding_kernels PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET decoding_kernels PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
 
-add_library(gpt_kernels STATIC gpt_kernels.cu)
+add_library(gpt_kernels STATIC gpt_kernels.cu logits_from_table_mma.cu)
 set_property(TARGET gpt_kernels PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET gpt_kernels PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
 

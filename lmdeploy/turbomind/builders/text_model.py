@@ -46,6 +46,49 @@ class TextModelBuilder(Builder):
         self._add_tensor('tok_embeddings', tensor,
                             split_side=SplitSide.OUTPUT)
 
+    def add_token_embeds_quant(self, table, scales):
+        """Commit an int8 embedding table + group scales.
+
+        Both shard along hidden (OUTPUT). Requires hidden % (tp*group) == 0.
+        """
+        hidden = table.shape[-1]
+        group = hidden // scales.shape[-1]
+        assert hidden % (self.tp.size * group) == 0, (
+            f'int8 embedding: hidden={hidden} not divisible by '
+            f'tp*group={self.tp.size * group}')
+        self._add_tensor('tok_embeddings', table, split_side=SplitSide.OUTPUT)
+        self._add_tensor('tok_embeddings_scale', scales,
+                         split_side=SplitSide.OUTPUT)
+
+    def add_token_embeds_quant4(self, table, scales, zeros):
+        """Commit an int4 embedding table (packed nibbles) + scales + zeros.
+
+        ``table`` is uint8 [vocab, hidden/2]; the logical hidden is
+        ``table.shape[-1] * 2``. All three shard along hidden (OUTPUT).
+        """
+        hidden = table.shape[-1] * 2
+        group = hidden // scales.shape[-1]
+        assert hidden % (self.tp.size * group) == 0, (
+            f'int4 embedding: hidden={hidden} not divisible by '
+            f'tp*group={self.tp.size * group}')
+        self._add_tensor('tok_embeddings', table, split_side=SplitSide.OUTPUT)
+        self._add_tensor('tok_embeddings_scale', scales,
+                         split_side=SplitSide.OUTPUT)
+        self._add_tensor('tok_embeddings_zero', zeros,
+                         split_side=SplitSide.OUTPUT)
+
+    def add_lm_head_shared(self):
+        """Bind the tied output head to the shared embedding table (TP=1 only).
+
+        Sets ``output_from_tok_embeddings`` on the ModelWeightConfig; no
+        LinearWeight is created, so the table exists exactly once.
+        """
+        if self.tp.size != 1:
+            raise RuntimeError(
+                'shared embedding head supports tp=1 only; regenerate the '
+                'sidecar or run with LMDEPLOY_DISABLE_EMBED_QUANT=1')
+        self.config.output_from_tok_embeddings = True
+
     def add_lm_head(self, linear):
         """Pad lm-head vocab so each TP-local logits row is uint4-aligned."""
         _VECTOR_BYTES = 16

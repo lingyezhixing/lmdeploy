@@ -16,7 +16,9 @@ SUPPORTED_ARCHS = dict(
     Qwen3MoeForCausalLM='qwen3-moe',
     # Qwen 3.5
     Qwen3_5ForConditionalGeneration='qwen3_5',
+    Qwen3_5ForCausalLM='qwen3_5',
     Qwen3_5MoeForConditionalGeneration='qwen3_5-moe',
+    Qwen3_5MoeForCausalLM='qwen3_5-moe',
     InternS2PreviewForConditionalGeneration='qwen3_5-moe',
     InternS2MobiusForConditionalGeneration='interns2_mobius',
     # InternVL family

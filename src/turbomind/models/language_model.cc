@@ -123,6 +123,26 @@ struct LanguageModel::Impl {
     Tensor LookupEmbedding(const Buffer_<int>& input_ids, Buffer symm_buf);
     Tensor PostEmbedding(const Tensor& features, Buffer symm_buf);
 
+    void lookup(Ref<Tensor> out, const Buffer_<int>& ids, cudaStream_t st)
+    {
+        const auto& table = weights_.tok_embeddings;
+        if (table.dtype() == kInt8) {
+            const auto& scales = weights_.tok_embeddings_scale;
+            const int   group  = (int)table.shape(1) / (int)scales.shape(1);
+            TM_CHECK_EQ((int)table.shape(1) % group, 0);
+            invokeEmbeddingLookupInt8(out, ids, table, scales, group, st);
+        }
+        else if (table.dtype() == kUint8) {
+            const auto& scales = weights_.tok_embeddings_scale;
+            const auto& zeros  = weights_.tok_embeddings_zero;
+            const int   group  = (int)table.shape(1) * 2 / (int)scales.shape(1);
+            invokeEmbeddingLookupInt4(out, ids, table, scales, zeros, group, st);
+        }
+        else {
+            invokeEmbeddingLookup(out, ids, table, st);
+        }
+    }
+
     // Build the global per-token validity mask for this pass (see `token_mask_`).
     void BuildTokenMask(const bool* finished, const int* q_offsets, const BatchData& b);
 
@@ -173,7 +193,7 @@ LanguageModel::Impl::Impl(
 
     unified_decoder_ = std::make_unique<UnifiedDecoder>(registry, engine, ctx, phases, weights_);
 
-    const int vocab_size = weights_.output->output_dim * tp_size_;
+    const int vocab_size = weights_.vocab_size_padded;
 
     generation_ = std::make_unique<Generation>(
         kFloat32, engine.max_batch_size, engine.session_len, weights_.vocab_size, vocab_size, comm_.h_tp_group, phases);
@@ -219,7 +239,8 @@ Tensor LanguageModel::Impl::LookupEmbedding(const Buffer_<int>& input_ids, Buffe
     const int hidden_units = weights_.hidden_units;
 
     const auto& embedding_table = weights_.tok_embeddings;
-    TM_CHECK_EQ(embedding_table.shape(1) * tp_size_, hidden_units);
+    const int   table_width     = (int)embedding_table.shape(1) * (embedding_table.dtype() == kUint8 ? 2 : 1);
+    TM_CHECK_EQ(table_width * tp_size_, hidden_units);
 
     const int token_num = input_ids.size();
 
@@ -230,16 +251,16 @@ Tensor LanguageModel::Impl::LookupEmbedding(const Buffer_<int>& input_ids, Buffe
     }
 
     if (tp_size_ == 1) {
-        invokeEmbeddingLookup(input_embeds, input_ids, embedding_table, st);
+        lookup(input_embeds, input_ids, st);
         TM_CUDA_CHECK(cudaGetLastError());
     }
     else if (use_ag2d_) {
-        const auto local_hidden_units = embedding_table.shape(1);
+        const auto local_hidden_units = table_width;
 
         Tensor temp{symm_buf.view(weights_.data_type), {token_num, tp_size_, local_hidden_units}};
         Tensor local{temp.slice({0, tp_rank_, 0}, {-1, 1, -1}).squeeze(1)};
 
-        invokeEmbeddingLookup(local, input_ids, embedding_table, st);
+        lookup(local, input_ids, st);
         TM_CUDA_CHECK(cudaGetLastError());
 
         comm_.d_comm->AllGather2D(local.raw_data(),
@@ -257,12 +278,12 @@ Tensor LanguageModel::Impl::LookupEmbedding(const Buffer_<int>& input_ids, Buffe
         Copy(temp.buffer(), input_embeds.buffer());
     }
     else {
-        const auto local_hidden_units = embedding_table.shape(1);
+        const auto local_hidden_units = table_width;
 
         Tensor temp{symm_buf.view(weights_.data_type), {tp_size_, token_num, local_hidden_units}};
         Tensor local{temp.slice(tp_rank_).squeeze(0)};
 
-        invokeEmbeddingLookup(local, input_ids, embedding_table, st);
+        lookup(local, input_ids, st);
         TM_CUDA_CHECK(cudaGetLastError());
 
         comm_.d_comm->AllGather(
@@ -289,13 +310,36 @@ Tensor LanguageModel::Impl::PostEmbedding(const Tensor& features, Buffer symm_bu
 
     const auto st = core::Context::stream().handle();
 
-    const int bsz              = features.shape(0);
-    const int local_vocab_size = weights_.output->output_dim;
-    const int vocab_size       = local_vocab_size * tp_size_;
+    const int bsz        = features.shape(0);
+    const int vocab_size = weights_.vocab_size_padded;
 
     if (bsz == 0) {
         return Tensor{{0, vocab_size}, weights_.data_type, kDEVICE};
     }
+
+    if (weights_.output_from_tok_embeddings) {
+        TM_CHECK_EQ(tp_size_, 1) << "shared embedding head supports tp=1 only";
+        Tensor logits{{bsz, vocab_size}, weights_.data_type, kDEVICE};
+        const auto& table = weights_.tok_embeddings;
+        const auto& scale = weights_.tok_embeddings_scale;
+        int         group = 128;
+        if (scale) {
+            TM_CHECK((int)scale.shape(1) > 0);
+            const int hidden = table.dtype() == kUint8 ? (int)table.shape(1) * 2 : (int)table.shape(1);
+            group            = hidden / (int)scale.shape(1);
+        }
+        TM_SCOPE_CALL(invokeLogitsFromTable(logits,
+                                            features,
+                                            table,
+                                            scale,
+                                            weights_.tok_embeddings_zero,
+                                            group,
+                                            st));
+        TM_DEBUG_TENSOR(logits, "logits", 1);
+        return logits;
+    }
+
+    const int local_vocab_size = weights_.output->output_dim;
 
     if (tp_size_ == 1) {
         Tensor logits{{bsz, vocab_size}, weights_.data_type, kDEVICE};

@@ -148,13 +148,22 @@ class BuiltModule:
 
 
 class Context:
-    """Bundle of per-GPU contexts and the model compute dtype."""
+    """Bundle of per-GPU contexts, the model compute dtype, and the
+    engine-level weight-loading policies (``embed_head`` / ``embed_head_format``)."""
 
-    def __init__(self, devices, gemm, data_type, gemm_input_dtype):
+    def __init__(self,
+                 devices,
+                 gemm,
+                 data_type,
+                 gemm_input_dtype,
+                 embed_head: str = 'auto',
+                 embed_head_format: str = 'native'):
         self.devices = devices
         self.gemm = gemm
         self.data_type = data_type
         self.gemm_input_dtype = gemm_input_dtype
+        self.embed_head = embed_head
+        self.embed_head_format = embed_head_format
         self._active_mask_stack = [(True,) * len(devices)]
 
     @property
@@ -428,6 +437,11 @@ class Builder:
         # Drain staged tensors
         for name, (tensor, split_side) in self._pending_tensors.items():
             self._commit_tensor(name, tensor, split_side)
+
+        # Release the staging dicts so the drained source tensors (e.g. the
+        # fp16/bf16 embed table) do not stay alive next to the C++ copies.
+        self._pending_children.clear()
+        self._pending_tensors.clear()
 
         return BuiltModule(self._handles)
 

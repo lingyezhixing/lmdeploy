@@ -38,6 +38,8 @@ class ModelLoader:
             mc.gemm(0),
             data_type=self.data_type,
             gemm_input_dtype=gemm_input_dtype,
+            embed_head=self.engine_config.embed_head,
+            embed_head_format=self.engine_config.embed_head_format,
         )
         ec = self.engine_config
 
@@ -72,7 +74,8 @@ class ModelLoader:
     def export(self):
         ckpt = create_checkpoint(
             self.model_path,
-            mappings=getattr(self.model, '_loader_mappings', []))
+            mappings=getattr(self.model, '_loader_mappings', []),
+            embed_head=self.engine_config.embed_head)
         try:
             self.model.model(Prefix(ckpt))
         finally:
@@ -82,7 +85,8 @@ class ModelLoader:
     def export_iter(self):
         ckpt = create_checkpoint(
             self.model_path,
-            mappings=getattr(self.model, '_loader_mappings', []))
+            mappings=getattr(self.model, '_loader_mappings', []),
+            embed_head=self.engine_config.embed_head)
         try:
             self.model.model(Prefix(ckpt))
             yield -1

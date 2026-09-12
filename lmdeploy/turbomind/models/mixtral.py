@@ -18,6 +18,7 @@ from ..builders import (
 from ..text_model import TextModel
 from .base import INPUT_MODELS
 from .utils import (
+    add_embedding_and_head,
     make_attention_config,
     make_ffn_config,
     make_model_weight_config,
@@ -48,9 +49,9 @@ class MixtralModel(TextModel):
                                    root_handles=self._root_handles,
                                    tp=self._model_tp,
                                    vocab_size=self.cfg.vocab_size)
-        builder.add_token_embeds(pfx.get('model.embed_tokens.weight'))
+        add_embedding_and_head(self, builder, pfx, 'model.embed_tokens.weight',
+                               tie=False)
         builder.norm = self.norm(pfx + 'model.norm')
-        builder.add_lm_head(self._linear(pfx + 'lm_head'))
         builder.layers = self.layers(pfx + 'model.layers')
         builder.build()
 
