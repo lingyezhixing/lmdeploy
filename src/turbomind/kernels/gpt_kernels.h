@@ -264,6 +264,7 @@ void invokeLogitsFromTable(Ref<Tensor>   logits,
                            const Tensor& scale,
                            const Tensor& zero,
                            int           group,
-                           cudaStream_t  st);
+                           cudaStream_t  st,
+                           int           impl = -1);
 
 }  // namespace turbomind

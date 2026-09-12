@@ -46,7 +46,10 @@ def embedding_lookup(out, ids, table):
     return out
 
 
-def logits_from_table(logits, x, table, scale, zero, group=128):
+def logits_from_table(logits, x, table, scale, zero, group=128, impl=None):
+    kwargs = {}
+    if impl is not None:
+        kwargs['impl'] = impl
     _tm.logits_from_table(
         _tm.from_dlpack_with_strides(logits),
         _tm.from_dlpack_with_strides(x),
@@ -55,5 +58,6 @@ def logits_from_table(logits, x, table, scale, zero, group=128):
         _tm.from_dlpack_with_strides(zero),
         group,
         stream_ptr=int(torch.cuda.current_stream(x.device).cuda_stream),
+        **kwargs,
     )
     return logits
