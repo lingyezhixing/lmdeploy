@@ -24,6 +24,7 @@ struct GemmParam {
     MatrixParam b;
     MatrixParam u;
     MatrixParam v;
+    MatrixParam global_scale;
 };
 
 template<class Op>
@@ -130,6 +131,11 @@ struct GemmUniversal {
         const auto mat_U = resolve_op<OperandU>(param.u, g);
         const auto mat_V = resolve_op<OperandV>(param.v, g);
 
+        const float* global_scale = nullptr;
+        if (param.global_scale.ptr) {
+            global_scale = static_cast<const float*>(resolve<const float, Striding::kBlocked>(param.global_scale, g).ptr.ptr);
+        }
+
         typename OperandA::GmemIter gmem_A{mat_A, {offset_m, offset_k}, {extent_m, CTA_K}};
         typename OperandB::GmemIter gmem_B{mat_B, {offset_n, offset_k}, {extent_n, CTA_K}};
 
@@ -140,7 +146,14 @@ struct GemmUniversal {
         typename OperandV::GmemIter gmem_V{mat_V, offset_V, extent_V};
 
         Mainloop mainloop{};
-        mainloop(gmem_A, gmem_B, gmem_U, gmem_V, frag_C, tile_iter, storage.mainloop);
+        mainloop(gmem_A,
+                 gmem_B,
+                 gmem_U,
+                 gmem_V,
+                 frag_C,
+                 tile_iter,
+                 storage.mainloop,
+                 global_scale);
 
         {
             sched.init(tile, storage.sched, std::true_type{});

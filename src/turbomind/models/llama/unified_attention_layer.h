@@ -44,7 +44,9 @@ public:
     using WeightType = AttentionWeight;
 
     static constexpr int kMaxKVSplits        = 128;
-    static constexpr int kMaxWorkspaceTokens = 4096;
+    // Covers the 2048-token prefill target; this workspace is sized per
+    // attention split and is not part of the KV cache.
+    static constexpr int kMaxWorkspaceTokens = 2048;
 
     struct ForwardParam {
         int               phase;

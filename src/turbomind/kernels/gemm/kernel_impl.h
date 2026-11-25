@@ -144,7 +144,6 @@ public:
     {
         (void)W;
         (void)Wdesc;
-        (void)global_scale;
         (void)global_scale_desc;
         MatrixLayout Adesc = _Adesc;
 
@@ -218,6 +217,7 @@ public:
             to_param((void*)B, Bdesc),
             to_param((void*)U, Udesc),
             to_param((void*)V, Vdesc),
+            to_param((void*)global_scale, global_scale_desc),
         };
 
         const auto grid  = sched.get_grid_shape();

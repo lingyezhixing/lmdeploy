@@ -12,7 +12,7 @@ from lmdeploy.archs import get_model_arch
 from lmdeploy.utils import get_logger
 
 from .. import _tm
-from ..builders import _act_type_id
+from ..builders import _act_type_id, _torch_dtype_to_cpp
 from ..builders.linear import Linear, _build_linear, _dequant_linear
 from ..embed_quant import (
     DISABLE_ENV,
@@ -25,6 +25,7 @@ from ..embed_quant import (
     quantize_table,
     resolve_embed_head,
 )
+from ..weight_format import TrivialFormat
 
 logger = get_logger('lmdeploy')
 
@@ -413,7 +414,7 @@ def _quantize_embed_table(table, fmt):
 
 
 def add_embedding_and_head(model, builder, pfx, embed_key, *, tie,
-                           head_key='lm_head'):
+                           head_key='lm_head', head_from_cpu=False):
     """Wire the embedding + output head by executing the resolved plan.
 
     Plan actions:
@@ -442,6 +443,8 @@ def add_embedding_and_head(model, builder, pfx, embed_key, *, tie,
         table = pfx.get_cpu(embed_key)
         hidden = table.shape[-1]
     ctx = getattr(builder, '_ctx', None)
+    if head_from_cpu and table is not None and ctx is not None and table.dtype != ctx.dtype:
+        table = table.to(ctx.dtype)
     fmt = getattr(ctx, 'embed_head_format', 'native')
     plan = resolve_embed_head(
         tie=tie, sidecar_format=sidecar,
@@ -497,6 +500,14 @@ def add_embedding_and_head(model, builder, pfx, embed_key, *, tie,
         if not embed_key.endswith('.weight'):
             raise RuntimeError(f'embed key must end with .weight, got {embed_key!r}')
         builder.add_lm_head(model._linear(pfx + embed_key[:-len('.weight')]))
+    elif head_from_cpu and ctx is not None:
+        weight = pfx.get_cpu(head_key + '.weight')
+        if weight.dtype != ctx.dtype:
+            weight = weight.to(ctx.dtype)
+        head = Linear(
+            {'weight': weight.t().contiguous()},
+            TrivialFormat(weight_dtype=_torch_dtype_to_cpp(ctx.dtype)))
+        builder.add_lm_head(head)
     else:
         builder.add_lm_head(model._linear(pfx + head_key))
 

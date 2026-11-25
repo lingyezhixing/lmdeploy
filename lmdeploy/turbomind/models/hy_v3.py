@@ -31,7 +31,9 @@ from ..builders import (
     TextModelBuilder,
     _act_type_id,
 )
+from ..builders.linear import Linear
 from ..text_model import TextModel
+from ..weight_format import FP8Format, FP8PerTensorFormat
 from .base import INPUT_MODELS
 from .utils import (
     add_embedding_and_head,
@@ -81,7 +83,7 @@ class HyV3TextModel(TextModel):
             tp=self._model_tp,
             vocab_size=self.cfg.vocab_size)
         add_embedding_and_head(self, builder, pfx, 'model.embed_tokens.weight',
-                               tie=self.cfg.tie_word_embeddings)
+                               tie=self.cfg.tie_word_embeddings, head_from_cpu=True)
         builder.norm = self.norm(pfx + 'model.norm')
         builder.layers = self.layers(pfx + 'model.layers')
         builder.build()
@@ -89,6 +91,15 @@ class HyV3TextModel(TextModel):
     # ------------------------------------------------------------------
     # Attention / FFN / MoE factories
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_scale(linear: Linear) -> Linear:
+        if not isinstance(linear.weight_format, FP8PerTensorFormat):
+            return linear
+        weight = linear.tensors['weight']
+        scale = linear.tensors['global_scale'].reshape(1, 1)
+        scales = scale.expand(weight.shape[0] // 128, weight.shape[1]).contiguous()
+        return Linear({'weight': weight, 'scales': scales}, FP8Format(block_out=1))
 
     def attn(self, pfx):
         q, k, v, o = [self._linear(pfx + f'{x}_proj') for x in 'qkvo']
@@ -99,6 +110,11 @@ class HyV3TextModel(TextModel):
             return reorder_rotary_emb(x, cfg.head_dim, cfg.rope.dim, dtype=self._ctx.dtype)
 
         q, k = [reorder(x) for x in (q, k)]
+
+        # Fused QKV needs one scale per output row; the three source tensors
+        # have independent per-tensor scales.  Expanding them here keeps the
+        # fused weights exact while using only ~200 KiB of scales per layer.
+        q, k, v = [self._row_scale(x) for x in (q, k, v)]
 
         m = AttentionBuilder(cfg, self._ctx, tp=self._attn_tp)
         m.add_qkv_proj(q, k, v)
@@ -117,7 +133,7 @@ class HyV3TextModel(TextModel):
         cfg.is_expert = is_expert
 
         m = FfnBuilder(cfg, self._ctx, tp=tp)
-        m.add_ffn(w1, w2, w3)
+        m.add_ffn(w1, w2, w3, fuse_gate_up=False)
         return m.build()
 
     def moe(self, pfx):

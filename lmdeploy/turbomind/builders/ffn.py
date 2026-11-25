@@ -89,12 +89,29 @@ class FfnBuilder(Builder):
         self.tp = tp
         self.config.tp_size = tp.size
 
-    def add_ffn(self, w1, w2, w3):
-        """Plan, pad, combine gate/up, then commit gate/up and down."""
+    def add_ffn(self, w1, w2, w3, *, fuse_gate_up=True):
+        """Plan, pad, combine gate/up, then commit gate/up and down.
+
+        ``fuse_gate_up=False`` keeps w1 and w3 as separate linears.  This is
+        required by weight formats that carry one scalar scale per tensor:
+        fusing w1/w3 would otherwise need a common scale for two different
+        source tensors.
+        """
         act_type = {0: _tm.ActivationType.kSilu, 1: _tm.ActivationType.kSiluGptOss}[self.config.act_type]
 
         plan = self._query_gemm(self._make_gemm_query(
             w1, grouped=self.config.is_expert))
+
+        if not fuse_gate_up:
+            self.config.inter_size = int(w1.tensors['weight'].size(-1))
+            self.config.fuse_silu = False
+            self._add_linear('w1', w1, SplitSide.OUTPUT, plan)
+            self._add_linear('w3', w3, SplitSide.OUTPUT, plan)
+            plan = self._query_gemm(self._make_gemm_query(
+                w2, grouped=self.config.is_expert))
+            self._add_linear('w2', w2, SplitSide.INPUT, plan)
+            return
+
         w1, w2, w3 = _pad_ffn_for_tp(w1, w2, w3, self.tp.size, plan)
         proj = w1.tensors['weight'].size(-1)
         gate_up_block = plan.gate_up(act_type, proj // self.tp.size)

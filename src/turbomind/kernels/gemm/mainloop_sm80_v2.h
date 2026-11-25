@@ -224,7 +224,8 @@ struct MainloopSm80_v2 {
                                GmemIterV&     gmem_V,
                                FragC&         frag_C,
                                int            tile_iter,
-                               SharedStorage& storage)
+                               SharedStorage& storage,
+                               const float*   /*global_scale*/ = nullptr)
     {
         static_assert(MMA::kAtomK == 1);
 

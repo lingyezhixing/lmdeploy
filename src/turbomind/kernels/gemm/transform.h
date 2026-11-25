@@ -156,4 +156,41 @@ struct Transform_HMMA_SIMT_B {
     }
 };
 
+// FP8 weight-only path for checkpoints with one scale per tensor.  The
+// per-row V tile is absent; every fragment is scaled by the same value.
+struct Transform_HMMA_SIMT_B_Global {
+    template<class F, int Nf, int Mf, int K, class D, int Nd, int Md, class S, int Ns, int Ms, int Ks>
+    __device__ static void
+    apply(Array<F, Nf> (&frag)[K][Mf], int k, Array<D, Nd> (&data)[K][Md], Array<S, Ns> (&stat)[Ks][Ms], int div,
+          const float* global_scale)
+    {
+        (void)stat;
+        (void)div;
+        static_assert(Nf * Mf == Nd * Md);
+        static_assert(Nd % Nf == 0 && Mf % Md == 0);
+
+        auto& frag_k = reinterpret_cast<Array<F, Nd>(&)[Md]>(frag[k]);
+        auto& data_k = data[k];
+
+        const half_t scale = __float2half(*global_scale);
+
+        PRAGMA_UNROLL
+        for (int m = 0; m < Md; ++m) {
+            auto tmp = ConvertKvCache<D, F>::convert(data_k[m]);
+            PRAGMA_UNROLL
+            for (int i = 0; i < Nd; i += 2) {
+                dequant((Array<F, 2>&)tmp[i], scale);
+            }
+            frag_k[m] = tmp;
+        }
+    }
+
+    template<class F>
+    __device__ static void dequant(Array<F, 2>& x, half_t scale)
+    {
+        x[0] = __hmul(x[0], scale);
+        x[1] = __hmul(x[1], scale);
+    }
+};
+
 }  // namespace turbomind::gemm

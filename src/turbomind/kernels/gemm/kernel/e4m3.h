@@ -70,6 +70,25 @@ std::optional<WeightBridge> supports_e4m3(const DataFormat& format, bool)
     return bridge;
 }
 
+std::optional<WeightBridge> supports_e4m3_global(const DataFormat& format, bool)
+{
+    if (format.dtype != kFloat8_e4m3) {
+        return std::nullopt;
+    }
+    if (format.scales.present() || format.zeros.present()) {
+        return std::nullopt;
+    }
+    return WeightBridge{};
+}
+
+template<class Arch, Order WeightOrder, uint32_t WeightPack>
+void pack_e4m3_global(LinearWeight& linear, cudaStream_t stream)
+{
+    PackWeight(linear, GetImpl<Arch, WeightOrder, WeightPack, uint16_t, uint8_t>(), stream);
+    linear.weight_format = DataFormat{kFloat8_e4m3, {}, kNull, kNull};
+    linear.q_desc        = {};
+}
+
 template<class Arch,
          Order    WeightOrder,
          uint32_t WeightPack,

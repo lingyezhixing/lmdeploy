@@ -1,7 +1,9 @@
+import pytest
 import torch
 
 from lmdeploy.turbomind import _tm
 from lmdeploy.turbomind.builders.linear import Linear
+from lmdeploy.turbomind.linear import get_linear
 from lmdeploy.turbomind.models.utils import reorder_rotary_emb
 from lmdeploy.turbomind.weight_format import (
     FP8Format,
@@ -26,21 +28,21 @@ def _weight():
     return torch.empty(256, 512, dtype=torch.float8_e4m3fn)
 
 
-def test_per_tensor_fp8_expands_scalar_scale():
+def test_per_tensor_fp8_uses_global_scale():
     fmt = FP8PerTensorFormat()
     weight = _weight()
     scale = torch.tensor([0.5], dtype=torch.float32)
     assert fmt.accepts({'.weight': weight, '.weight_scale': scale})
 
     normalized_weight = fmt.normalize(weight, 'weight')
-    normalized_scale = fmt.normalize(scale, 'scales')
+    normalized_scale = fmt.normalize(scale, 'global_scale')
 
     assert tuple(normalized_weight.shape) == (512, 256)
-    assert tuple(normalized_scale.shape) == (4, 2)
-    assert torch.equal(normalized_scale, torch.full((4, 2), 0.5))
+    assert tuple(normalized_scale.shape) == (1,)
+    assert torch.equal(normalized_scale, scale)
 
     data_format = fmt.make_data_format()
-    assert data_format.block_sizes == [128, 128]
+    assert data_format.block_sizes == []
 
 
 def test_per_tensor_fp8_dequant_applies_scale():
@@ -51,23 +53,20 @@ def test_per_tensor_fp8_dequant_applies_scale():
 
     tensors = {
         'weight': fmt.normalize(weight, 'weight'),
-        'scales': fmt.normalize(scale, 'scales'),
+        'global_scale': fmt.normalize(scale, 'global_scale'),
     }
     result = fmt.dequant(tensors, torch.float16)
     expected = (weight.float() * scale).t().half()
     torch.testing.assert_close(result['weight'], expected, rtol=1e-3, atol=1e-3)
 
 
-def test_reorder_keeps_fp8_block_scales_when_block_spans_heads():
-    # head_dim=64, block_out=128: one scale block covers two heads.  RoPE
-    # permutes rows inside each head, so the block scale is unchanged.
+def test_reorder_keeps_fp8_global_scale():
     weight = torch.zeros(2048, 128, dtype=torch.float8_e4m3fn)
-    scales = torch.arange(16 * 1, dtype=torch.float32).reshape(16, 1)
-    linear = Linear({'weight': weight, 'scales': scales}, FP8PerTensorFormat())
+    linear = Linear({'weight': weight, 'global_scale': torch.tensor([1.0])}, FP8PerTensorFormat())
 
     reordered = reorder_rotary_emb(linear, 64, 64, dtype=torch.float16)
 
-    assert torch.equal(reordered.tensors['scales'], scales)
+    assert torch.equal(reordered.tensors['global_scale'], torch.tensor([1.0]))
 
 
 def test_per_tensor_fp8_requires_scalar_scale():
@@ -93,3 +92,23 @@ def test_resolver_prefers_per_tensor_fp8_over_trivial():
     }))
     assert isinstance(fmt, FP8PerTensorFormat)
     assert set(tensors) == {'.weight', '.weight_scale'}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA required')
+def test_global_scale_linear_matches_reference():
+    torch.manual_seed(0)
+    weight = (torch.randn(512, 256) * 0.02).to(torch.float8_e4m3fn)
+    scale = torch.tensor([0.37], dtype=torch.float32)
+    x = torch.randn(2, 256, dtype=torch.float16, device='cuda')
+
+    fmt = FP8PerTensorFormat()
+    assert fmt.accepts({'.weight': weight, '.weight_scale': scale})
+    linear = get_linear()
+    plan = linear.get_weight_plan(
+        weight_format=fmt, dtype=torch.float16, input_dtype=torch.float16, output_dtype=torch.float16)
+    prepared = linear.prepare_weight(weight.to('cuda'), plan=plan, global_scale=scale.to('cuda'))
+    exec_plan = linear.get_exec_plan(x, prepared)
+    actual, _ = linear(x, prepared, exec_plan=exec_plan)
+
+    expected = (x.float() @ (weight.float().cuda() * scale.cuda()).t()).half()
+    torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)

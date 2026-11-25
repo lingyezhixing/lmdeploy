@@ -29,7 +29,8 @@ template<class A,
          class V,
          Order order_C,
          class Tc,
-         int group_axis>
+         int group_axis,
+         bool UseGlobalScale = false>
 struct Sm70_s884 {
 
     static_assert(A::SmemCopyAtom::K == B::SmemCopyAtom::K);
@@ -82,7 +83,8 @@ struct Sm70_s884 {
                                       V,
                                       GroupSizeV,
                                       Stages,
-                                      true>;  // FusePrefetch_
+                                      true,  // FusePrefetch_
+                                      UseGlobalScale>;
 
         static constexpr int CHUNK_K = std::lcm(std::lcm(GroupSizeU, GroupSizeV), CTA_K);
 
@@ -171,6 +173,29 @@ struct Config_E4M3 {
         kRowMajor,
         half,
         GroupAxis>::template Type<Config_, Stages, Raster, PolicyA, PolicyB, SplitK, 1, 128, EpiM, EpiN>::Kernel;
+};
+
+struct Config_E4M3_Global {
+    template<class Config_,
+             int   Stages,
+             Order Raster,
+             class PolicyA,
+             class PolicyB,
+             bool SplitK,
+             int  EpiM      = -1,
+             int  EpiN      = -1,
+             int  GroupAxis = -1>
+    using Type = typename Sm70_s884<
+        Operand_A<half>,
+        Transform_Default,
+        VoidOperand,
+        Operand_B_Pack<fp8_e4m3_t>,
+        Transform_HMMA_SIMT_B_Global,
+        VoidOperand,
+        kRowMajor,
+        half,
+        GroupAxis,
+        true>::template Type<Config_, Stages, Raster, PolicyA, PolicyB, SplitK, 1, 1, EpiM, EpiN>::Kernel;
 };
 
 struct Config_F16 {

@@ -20,8 +20,11 @@ using namespace config::geometry;
 
 constexpr auto e4m3_packer =
     pack_e4m3<Sm70, kRowMajor, HMMA_884 | OPERAND_B | 1, kColMajor, HMMA_884 | OPERAND_V | 1, kHalf>;
+constexpr auto e4m3_global_packer = pack_e4m3_global<Sm70, kRowMajor, HMMA_884 | OPERAND_B | 1>;
 
 const Family e4m3{2, 190, kHalf, kHalf, 128, 8, 1, 1, true, true, supports_e4m3<kHalf, 1>, e4m3_packer};
+const Family e4m3_global{
+    36, 190, kHalf, kHalf, 128, 8, 1, 1, true, true, supports_e4m3_global, e4m3_global_packer};
 
 // NVCC requires defaults on the template-template parameter.
 template<template<class Config_,
@@ -45,9 +48,11 @@ void register_kernels(Collector& c)
     }
 }
 
-using E4M3 = Config_E4M3;
+using E4M3        = Config_E4M3;
+using E4M3_Global = Config_E4M3_Global;
 
 Registrar reg(e4m3, register_kernels<E4M3::Type>);
+Registrar reg_global(e4m3_global, register_kernels<E4M3_Global::Type>);
 }  // namespace
 
 }  // namespace turbomind::gemm

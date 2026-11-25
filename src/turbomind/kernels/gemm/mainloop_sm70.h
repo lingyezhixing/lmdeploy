@@ -81,7 +81,8 @@ template<class MMA,
          class OperandV_,
          int  GroupSizeV_,
          int  Stages_,
-         bool FusePrefetch_>
+         bool FusePrefetch_,
+         bool UseGlobalScale_ = false>
 struct MainloopSm70 {
 
     using MMA_Atom = typename MMA::Atom;
@@ -199,7 +200,8 @@ struct MainloopSm70 {
                                GmemIterV&     gmem_V,
                                FragC&         frag_C,
                                int            tile_iter,
-                               SharedStorage& storage)
+                               SharedStorage& storage,
+                               const float*   global_scale = nullptr)
     {
         static_assert(MMA::kAtomK == 1);
 
@@ -299,7 +301,12 @@ struct MainloopSm70 {
         preload(0);  // smem -> data_[A,B,U,V]
 
         TransformA::apply(frag_A, 0, data_A, data_U, UU);
-        TransformB::apply(frag_B, 0, data_B, data_V, VV);
+        if constexpr (UseGlobalScale_) {
+            TransformB::apply(frag_B, 0, data_B, data_V, VV, global_scale);
+        }
+        else {
+            TransformB::apply(frag_B, 0, data_B, data_V, VV);
+        }
 
         PRAGMA_NO_UNROLL
         for (; tile_iter > 0; --tile_iter) {
@@ -343,7 +350,12 @@ struct MainloopSm70 {
                 }
 
                 TransformA::apply(frag_A, (k + 1) % ITER_K, data_A, data_U, UU);
-                TransformB::apply(frag_B, (k + 1) % ITER_K, data_B, data_V, VV);
+                if constexpr (UseGlobalScale_) {
+                    TransformB::apply(frag_B, (k + 1) % ITER_K, data_B, data_V, VV, global_scale);
+                }
+                else {
+                    TransformB::apply(frag_B, (k + 1) % ITER_K, data_B, data_V, VV);
+                }
             }
         }
 

@@ -33,10 +33,11 @@ MoeWeight::MoeWeight(const core::MoeConfig& cfg)
 static std::unique_ptr<LinearWeight> AliasLinear(const LinearWeight& src)
 {
     auto dst    = std::make_unique<LinearWeight>();
-    dst->weight = src.weight;
-    dst->bias   = src.bias;
-    dst->scales = src.scales;
-    dst->zeros  = src.zeros;
+    dst->weight       = src.weight;
+    dst->bias         = src.bias;
+    dst->scales       = src.scales;
+    dst->zeros        = src.zeros;
+    dst->global_scale = src.global_scale;
     src.copy_metadata_to(*dst);
     return dst;
 }

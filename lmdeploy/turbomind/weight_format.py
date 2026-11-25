@@ -428,18 +428,16 @@ class FP8Format(WeightFormat):
 class FP8PerTensorFormat(FP8Format):
     """FP8 E4M3 weights carrying one float32 scale for the whole tensor.
 
-    Checkpoints such as Hy-MT3 store ``weight_scale`` as a scalar and use a
-    static ``input_scale``.  The SM70/SM75 weight-only kernels consume scales
-    blocked every 128 input channels, so the scalar is expanded to the
-    kernel's 128x128 blocking here.  The weights stay FP8; only the scale
-    layout changes.
+    The SM70 weight-only kernel applies this scalar through the GEMM's
+    ``global_scale`` argument instead of materializing a per-row scale tensor.
     """
 
-    suffix_map = {'.weight': 'weight', '.weight_scale': 'scales'}
+    suffix_map = {'.weight': 'weight', '.weight_scale': 'global_scale'}
+    scales_dtype = _tm.DataType.TYPE_INVALID
+    zeros_dtype = _tm.DataType.TYPE_INVALID
 
     def __init__(self):
         super().__init__(block_out=128)
-        self._weight_shape = None
 
     def accepts(self, available: dict[str, Tensor]) -> bool:
         weight = available.get('.weight')
@@ -450,23 +448,25 @@ class FP8PerTensorFormat(FP8Format):
             return False
         if weight.dim() != 2:
             return False
-        if scale.numel() != 1 or scale.dtype not in _GENERIC_FLOAT_DTYPES:
-            return False
-        self._weight_shape = (int(weight.shape[-2]), int(weight.shape[-1]))
-        return True
+        return scale.numel() == 1 and scale.dtype in _GENERIC_FLOAT_DTYPES
 
     def normalize(self, x: Tensor, kind: str) -> Tensor:
-        if kind != 'scales':
-            return super().normalize(x, kind)
-        out_dim, in_dim = self._weight_shape
-        block_out = self.block_out
-        block_in = self.block_in
-        shape = (
-            (out_dim + block_out - 1) // block_out,
-            (in_dim + block_in - 1) // block_in,
-        )
-        blocks = x.reshape(1, 1).expand(shape).contiguous()
-        return blocks.t().contiguous()
+        if kind == 'global_scale':
+            return x.reshape(1).to(torch.float32).contiguous()
+        return super().normalize(x, kind)
+
+    def pack(self, tensor: Tensor, kind: str) -> PackedTensor:
+        if kind == 'global_scale':
+            return PackedTensor(tensor, [1], _tm.DataType.TYPE_FP32)
+        return super().pack(tensor, kind)
+
+    def make_data_format(self) -> _tm.DataFormat:
+        return _tm.DataFormat(self.weight_dtype, [], _tm.DataType.TYPE_INVALID, _tm.DataType.TYPE_INVALID)
+
+    def dequant(self, tensors, dtype):
+        weight = tensors['weight'].view(torch.float8_e4m3fn).float()
+        scale = tensors['global_scale'].reshape(-1)[0].float()
+        return {'weight': (weight * scale).to(dtype)}
 
 
 class MXFP4Format(WeightFormat):
