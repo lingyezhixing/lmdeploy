@@ -70,7 +70,7 @@ std::optional<WeightBridge> supports_e4m3(const DataFormat& format, bool)
     return bridge;
 }
 
-std::optional<WeightBridge> supports_e4m3_global(const DataFormat& format, bool)
+inline std::optional<WeightBridge> supports_e4m3_global(const DataFormat& format, bool)
 {
     if (format.dtype != kFloat8_e4m3) {
         return std::nullopt;
