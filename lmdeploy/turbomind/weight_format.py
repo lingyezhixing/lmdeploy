@@ -425,6 +425,50 @@ class FP8Format(WeightFormat):
         return PackedTensor(tensor, None, None)
 
 
+class FP8PerTensorFormat(FP8Format):
+    """FP8 E4M3 weights carrying one float32 scale for the whole tensor.
+
+    Checkpoints such as Hy-MT3 store ``weight_scale`` as a scalar and use a
+    static ``input_scale``.  The SM70/SM75 weight-only kernels consume scales
+    blocked every 128 input channels, so the scalar is expanded to the
+    kernel's 128x128 blocking here.  The weights stay FP8; only the scale
+    layout changes.
+    """
+
+    suffix_map = {'.weight': 'weight', '.weight_scale': 'scales'}
+
+    def __init__(self):
+        super().__init__(block_out=128)
+        self._weight_shape = None
+
+    def accepts(self, available: dict[str, Tensor]) -> bool:
+        weight = available.get('.weight')
+        scale = available.get('.weight_scale')
+        if weight is None or scale is None:
+            return False
+        if weight.dtype not in (torch.float8_e4m3fn, torch.uint8):
+            return False
+        if weight.dim() != 2:
+            return False
+        if scale.numel() != 1 or scale.dtype not in _GENERIC_FLOAT_DTYPES:
+            return False
+        self._weight_shape = (int(weight.shape[-2]), int(weight.shape[-1]))
+        return True
+
+    def normalize(self, x: Tensor, kind: str) -> Tensor:
+        if kind != 'scales':
+            return super().normalize(x, kind)
+        out_dim, in_dim = self._weight_shape
+        block_out = self.block_out
+        block_in = self.block_in
+        shape = (
+            (out_dim + block_out - 1) // block_out,
+            (in_dim + block_in - 1) // block_in,
+        )
+        blocks = x.reshape(1, 1).expand(shape).contiguous()
+        return blocks.t().contiguous()
+
+
 class MXFP4Format(WeightFormat):
     name = 'mxfp4'
     suffix_map = {

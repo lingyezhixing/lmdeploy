@@ -364,14 +364,9 @@ def reorder_rotary_emb(x, head_dim: int, rope_dim: int, *, dtype: torch.dtype):
         new_tensors = {}
         for kind, tensor in x.tensors.items():
             if kind in ('scales', 'zeros') and block_out > 0:
-                # Block-level shuffle: reinterpret each block as a "head"
-                # so _reorder_rotary_emb shuffles at block granularity.
-                blocks_per_head = block_out // head_dim
-                if blocks_per_head <= 1:
-                    new_tensors[kind] = tensor
-                else:
-                    rope_dim_blocks = rope_dim * blocks_per_head // head_dim
-                    new_tensors[kind] = _reorder_rotary_emb(tensor, blocks_per_head, rope_dim_blocks)
+                # Quantized blocks cover whole heads, so RoPE permutations stay
+                # inside a block and the block scale is unchanged.
+                new_tensors[kind] = tensor
             elif tensor.size(-1) % head_dim == 0:
                 new_tensors[kind] = _reorder_rotary_emb(tensor, head_dim, rope_dim)
             else:

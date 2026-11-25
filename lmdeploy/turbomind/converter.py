@@ -17,6 +17,7 @@ from .weight_format import (
     AWQFormat,
     CompressedTensorFormat,
     FP8Format,
+    FP8PerTensorFormat,
     GPTQFormat,
     MXFP4Format,
     TrivialFormat,
@@ -39,6 +40,7 @@ def _build_quantized_formats(model_format: str | None, group_size: int | None) -
         formats.append(CompressedTensorFormat(block_in=group_size))
     elif model_format == 'fp8':
         formats.append(FP8Format(block_out=128))
+        formats.append(FP8PerTensorFormat())
     elif model_format == 'mxfp4':
         formats.append(MXFP4Format())
     else:

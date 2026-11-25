@@ -1156,6 +1156,10 @@ static void launchMoeGateNoAuxTCKernel_V2(float*       scales,
         if (experts == 64 && experts_per_token == 4) {
             return invoke(_Int<64>, _Int<4>, _Int<16>, _Int<4>, _Int<1>, routing);
         }
+        // HYV3 (Hy-MT3) uses 128 routed experts with top-8.
+        if (experts == 128 && experts_per_token == 8) {
+            return invoke(_Int<128>, _Int<8>, _Int<8>, _Int<4>, _Int<1>, routing);
+        }
         if (experts == 160 && experts_per_token == 8) {
             return invoke(_Int<160>, _Int<8>, _Int<10>, _Int<2>, _Int<1>, routing);
         }
