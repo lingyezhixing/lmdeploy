@@ -401,7 +401,7 @@ void TurboMind::Impl::WarmUp(int index)
     auto& linear = *ctx.linear;
 
     if (auto str = std::getenv("TM_GEMM_IMPORT")) {
-        std::ifstream ifs(str);
+        std::ifstream ifs(str, std::ios::binary);
         const int     n_imported = linear.Import(ifs);
         if (index == 0) {
             TM_LOG_INFO("{} records imported", n_imported);
@@ -501,7 +501,7 @@ void TurboMind::Impl::WarmUp(int index)
 
     if (index == 0) {
         if (auto path = std::getenv("TM_GEMM_EXPORT")) {
-            std::ofstream ofs(path);
+            std::ofstream ofs(path, std::ios::binary);
             const auto    n_records = linear.Export(ofs);
             TM_LOG_INFO("{} records exported.", n_records);
         }
